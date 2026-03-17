@@ -4,29 +4,34 @@ import re
 from datetime import date
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-# ─── TOKEN ────────────────────────────────────────────────────────────────────
+# ─── TOKEN E FIREBASE ────────────────────────────────────────────────────────
 TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# ─── BANCO DE DADOS (arquivo JSON local) ─────────────────────────────────────
-DB_FILE = "obras.json"
+# Inicializa Firebase com as credenciais do ambiente
+cred_json = os.environ.get("FIREBASE_CREDENTIALS", "")
+if cred_json:
+    cred_dict = json.loads(cred_json)
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred)
+else:
+    print("ERRO: variável FIREBASE_CREDENTIALS não definida!")
 
-def carregar():
-    try:
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
+db = firestore.client()
 
-def salvar(dados):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(dados, f, ensure_ascii=False, indent=2)
-
-def get_user(dados, uid):
+# ─── FUNÇÕES FIREBASE ─────────────────────────────────────────────────────────
+def carregar(uid):
     uid = str(uid)
-    if uid not in dados:
-        dados[uid] = {"obras": {}, "obra_atual": None}
-    return dados[uid]
+    doc = db.collection("usuarios").document(uid).get()
+    if doc.exists:
+        return doc.to_dict()
+    return {"obras": {}, "obra_atual": None}
+
+def salvar(uid, dados):
+    uid = str(uid)
+    db.collection("usuarios").document(uid).set(dados)
 
 # ─── FORMATAÇÃO ───────────────────────────────────────────────────────────────
 def fmt(v):
@@ -153,11 +158,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def nova_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = update.effective_user.id
-    dados = carregar()
-    user  = get_user(dados, uid)
+    dados = carregar(uid)
     texto = " ".join(ctx.args) if ctx.args else ""
 
-    # Formato: /nova_obra Nome da Obra — 100000
     partes = re.split(r'\s*[-—–]\s*', texto, 1)
     if len(partes) < 2:
         await update.message.reply_text(
@@ -173,9 +176,11 @@ async def nova_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     oid = re.sub(r'\s+', '_', nome.lower())[:20]
-    user["obras"][oid] = {"nome": nome, "valor": valor, "lancamentos": []}
-    user["obra_atual"] = oid
-    salvar(dados)
+    if "obras" not in dados:
+        dados["obras"] = {}
+    dados["obras"][oid] = {"nome": nome, "valor": valor, "lancamentos": []}
+    dados["obra_atual"] = oid
+    salvar(uid, dados)
 
     await update.message.reply_text(
         f"✅ Obra *{nome}* criada!\n"
@@ -186,18 +191,17 @@ async def nova_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def trocar_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = update.effective_user.id
-    dados = carregar()
-    user  = get_user(dados, uid)
+    dados = carregar(uid)
     busca = " ".join(ctx.args).lower().strip() if ctx.args else ""
 
     if not busca:
         await listar_obras(update, ctx)
         return
 
-    for oid, obra in user["obras"].items():
+    for oid, obra in dados.get("obras", {}).items():
         if busca in obra["nome"].lower() or busca == oid:
-            user["obra_atual"] = oid
-            salvar(dados)
+            dados["obra_atual"] = oid
+            salvar(uid, dados)
             await update.message.reply_text(
                 f"✅ Obra ativa: *{obra['nome']}*\n💰 Contrato: {fmt(obra['valor'])}",
                 parse_mode="Markdown"
@@ -208,17 +212,16 @@ async def trocar_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def listar_obras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = update.effective_user.id
-    dados = carregar()
-    user  = get_user(dados, uid)
+    dados = carregar(uid)
 
-    if not user["obras"]:
+    if not dados.get("obras"):
         await update.message.reply_text("Nenhuma obra cadastrada.\nUse: /nova\\_obra Nome — Valor", parse_mode="Markdown")
         return
 
     txt = "📋 *Suas obras:*\n\n"
-    for oid, obra in user["obras"].items():
-        ativo = " ← ativa" if oid == user["obra_atual"] else ""
-        total = sum(l["valor"] for l in obra["lancamentos"])
+    for oid, obra in dados["obras"].items():
+        ativo = " ← ativa" if oid == dados.get("obra_atual") else ""
+        total = sum(l["valor"] for l in obra.get("lancamentos", []))
         lucro = obra["valor"] - total
         txt += f"🏗️ *{obra['nome']}*{ativo}\n"
         txt += f"   Contrato: {fmt(obra['valor'])} | Gasto: {fmt(total)} | Lucro: {fmt(lucro)}\n"
@@ -228,16 +231,15 @@ async def listar_obras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def resumo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = update.effective_user.id
-    dados = carregar()
-    user  = get_user(dados, uid)
-    oid   = user.get("obra_atual")
+    dados = carregar(uid)
+    oid   = dados.get("obra_atual")
 
-    if not oid or oid not in user["obras"]:
+    if not oid or oid not in dados.get("obras", {}):
         await update.message.reply_text("Nenhuma obra ativa. Use /obras para selecionar.")
         return
 
-    obra = user["obras"][oid]
-    lans = obra["lancamentos"]
+    obra = dados["obras"][oid]
+    lans = obra.get("lancamentos", [])
     total = sum(l["valor"] for l in lans)
     mat   = sum(l["valor"] for l in lans if l["cat"] == "material")
     mao   = sum(l["valor"] for l in lans if l["cat"] == "mao")
@@ -247,7 +249,6 @@ async def resumo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pct   = (total / obra["valor"] * 100) if obra["valor"] > 0 else 0
     mgm   = (lucro / obra["valor"] * 100) if obra["valor"] > 0 else 0
 
-    # Barra de progresso visual
     blocos = int(pct / 10)
     barra  = "█" * blocos + "░" * (10 - blocos)
 
@@ -273,21 +274,21 @@ async def resumo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def apagar_ultimo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = update.effective_user.id
-    dados = carregar()
-    user  = get_user(dados, uid)
-    oid   = user.get("obra_atual")
+    dados = carregar(uid)
+    oid   = dados.get("obra_atual")
 
-    if not oid or oid not in user["obras"]:
+    if not oid or oid not in dados.get("obras", {}):
         await update.message.reply_text("Nenhuma obra ativa.")
         return
 
-    lans = user["obras"][oid]["lancamentos"]
+    lans = dados["obras"][oid].get("lancamentos", [])
     if not lans:
         await update.message.reply_text("Não há lançamentos para remover.")
         return
 
     ultimo = lans.pop()
-    salvar(dados)
+    dados["obras"][oid]["lancamentos"] = lans
+    salvar(uid, dados)
     await update.message.reply_text(
         f"🗑️ Removido: *{ultimo['desc']}* — {fmt(ultimo['valor'])}",
         parse_mode="Markdown"
@@ -295,16 +296,15 @@ async def apagar_ultimo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def relatorio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = update.effective_user.id
-    dados = carregar()
-    user  = get_user(dados, uid)
-    oid   = user.get("obra_atual")
+    dados = carregar(uid)
+    oid   = dados.get("obra_atual")
 
-    if not oid or oid not in user["obras"]:
+    if not oid or oid not in dados.get("obras", {}):
         await update.message.reply_text("Nenhuma obra ativa.")
         return
 
-    obra  = user["obras"][oid]
-    lans  = obra["lancamentos"]
+    obra  = dados["obras"][oid]
+    lans  = obra.get("lancamentos", [])
     total = sum(l["valor"] for l in lans)
     lucro = obra["valor"] - total
 
@@ -331,12 +331,11 @@ async def relatorio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = update.effective_user.id
-    dados = carregar()
-    user  = get_user(dados, uid)
-    oid   = user.get("obra_atual")
+    dados = carregar(uid)
+    oid   = dados.get("obra_atual")
     texto = update.message.text
 
-    if not oid or oid not in user["obras"]:
+    if not oid or oid not in dados.get("obras", {}):
         await update.message.reply_text(
             "⚠️ Nenhuma obra ativa!\n\n"
             "Crie uma obra primeiro:\n"
@@ -351,12 +350,14 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(extra, parse_mode="Markdown")
         return
 
-    obra = user["obras"][oid]
+    obra = dados["obras"][oid]
+    if "lancamentos" not in obra:
+        obra["lancamentos"] = []
     obra["lancamentos"].append({
         "data": hoje(), "desc": desc, "forn": forn,
         "cat": cat, "valor": valor
     })
-    salvar(dados)
+    salvar(uid, dados)
 
     total = sum(l["valor"] for l in obra["lancamentos"])
     lucro = obra["valor"] - total
@@ -388,7 +389,7 @@ def main():
     app.add_handler(CommandHandler("relatorio",     relatorio))
     app.add_handler(CommandHandler("apagar_ultimo", apagar_ultimo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receber_mensagem))
-    print("Bot rodando...")
+    print("Bot rodando com Firebase! 🔥")
     app.run_polling()
 
 if __name__ == "__main__":
