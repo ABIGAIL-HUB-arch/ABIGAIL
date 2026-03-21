@@ -46,6 +46,7 @@ FUNCOES_PADRAO = {
     "serralheiro": 2200,
     "ajudante":    1600,
     "instalador":  2000,
+    "cortador" : 2700,
 }
 
 ALIASES_FUNCAO = {
