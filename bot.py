@@ -6,10 +6,10 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import firebase_admin
 from firebase_admin import credentials, firestore
- 
+
 # ─── TOKEN E FIREBASE ────────────────────────────────────────────────────────
 TOKEN = os.environ.get("BOT_TOKEN", "")
- 
+
 cred_json = os.environ.get("FIREBASE_CREDENTIALS", "")
 if cred_json:
     cred_dict = json.loads(cred_json)
@@ -17,9 +17,9 @@ if cred_json:
     firebase_admin.initialize_app(cred)
 else:
     print("ERRO: variável FIREBASE_CREDENTIALS não definida!")
- 
+
 db = firestore.client()
- 
+
 # ─── FUNÇÕES FIREBASE ─────────────────────────────────────────────────────────
 def carregar(uid):
     uid = str(uid)
@@ -27,20 +27,20 @@ def carregar(uid):
     if doc.exists:
         return doc.to_dict()
     return {"obras": {}, "obra_atual": None, "funcionarios": {}}
- 
+
 def salvar(uid, dados):
     uid = str(uid)
     db.collection("usuarios").document(uid).set(dados)
- 
+
 # ─── FORMATAÇÃO ───────────────────────────────────────────────────────────────
 def fmt(v):
     return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
- 
+
 def hoje():
     return date.today().strftime("%d/%m/%Y")
- 
+
 DIAS_UTEIS_MES = 22
- 
+
 # ─── FUNCIONÁRIOS PADRÃO ─────────────────────────────────────────────────────
 FUNCOES_PADRAO = {
     "serralheiro": 2200,
@@ -48,19 +48,19 @@ FUNCOES_PADRAO = {
     "instalador":  2000,
     "cortador":    2000,
 }
- 
+
 ALIASES_FUNCAO = {
     "serralheiro": ["serralheiro", "serralheiros"],
     "ajudante":    ["ajudante", "ajudantes", "auxiliar", "auxiliares"],
     "instalador":  ["instalador", "instaladores", "montador", "montadores"],
 }
- 
+
 def get_funcionarios(dados):
     return dados.get("funcionarios") or FUNCOES_PADRAO.copy()
- 
+
 def custo_dia(salario_mensal):
     return salario_mensal / DIAS_UTEIS_MES
- 
+
 # ─── EXTRATORES ───────────────────────────────────────────────────────────────
 def extrair_valor(texto):
     t = texto.lower()
@@ -75,7 +75,7 @@ def extrair_valor(texto):
     m = re.search(r'(\d+(?:[.,]\d+)?)', t)
     if m: return float(m.group(1).replace(',', '.'))
     return 0
- 
+
 def extrair_dias(texto):
     t = texto.lower()
     m = re.search(r'(\d+)\s*dias?', t)
@@ -85,7 +85,7 @@ def extrair_dias(texto):
     for p, v in palavras.items():
         if p + " dia" in t: return v
     return 1
- 
+
 def is_fabricacao(texto):
     t = texto.lower()
     fab_words = ["fabrica", "fábrica", "fabricação", "fabricacao", "oficina",
@@ -96,7 +96,7 @@ def is_fabricacao(texto):
     for w in inst_words:
         if w in t: return False
     return True
- 
+
 def extrair_funcoes_texto(texto, funcionarios):
     t = texto.lower()
     encontradas = []
@@ -106,7 +106,7 @@ def extrair_funcoes_texto(texto, funcionarios):
                 encontradas.append(funcao)
                 break
     return encontradas
- 
+
 def extrair_fornecedor(texto):
     m = re.search(
         r'(?:na|da|do|no|em|pela|pelo|empresa|fornecedor)\s+'
@@ -118,7 +118,7 @@ def extrair_fornecedor(texto):
         r'\s+por\s+[rR]?\$?\s*\d', texto)
     if m: return m.group(1).strip()
     return ""
- 
+
 PALAVRAS_MAO = ["serralheiro", "ajudante", "instalador", "montador",
                 "mao de obra", "mão de obra", "hora homem",
                 "diaria", "diária", "dias de", "dia de",
@@ -130,7 +130,7 @@ PALAVRAS_MAT = ["aluminio", "alumínio", "vidro", "acessorio", "acessório",
                 "ferragem", "perfil", "borracha", "silicone", "parafuso",
                 "chapa", "kit", "material", "insumo", "fita", "fechadura",
                 "trilho", "roldana", "massa", "selante", "esquadria", "espelho"]
- 
+
 def extrair_categoria(texto):
     t = texto.lower()
     for p in PALAVRAS_MAO:
@@ -140,22 +140,22 @@ def extrair_categoria(texto):
     for p in PALAVRAS_MAT:
         if p in t: return "material"
     return "outros"
- 
+
 def processar_mensagem(texto, funcionarios):
     cat = extrair_categoria(texto)
     t = texto.lower()
- 
+
     if cat == "mao":
         dias = extrair_dias(texto)
         funcoes = extrair_funcoes_texto(texto, funcionarios)
         fab = is_fabricacao(texto)
         cat_final = "hh_fabricacao" if fab else "hh_instalacao"
- 
+
         # Verifica valor explícito
         valor_direto = 0
         if re.search(r'r\$\s*\d', t) or re.search(r'\d+\s*mil', t):
             valor_direto = extrair_valor(texto)
- 
+
         if funcoes and valor_direto == 0:
             total = 0
             detalhes = []
@@ -182,7 +182,7 @@ def processar_mensagem(texto, funcionarios):
         else:
             return None, None, None, None, \
                 "⚠️ Não identifiquei a função.\n\nExemplos:\n_Serralheiro 2 dias fábrica_\n_Instalador e ajudante 3 dias instalação_"
- 
+
     if cat == "material":
         valor = extrair_valor(texto)
         forn = extrair_fornecedor(texto)
@@ -193,19 +193,19 @@ def processar_mensagem(texto, funcionarios):
         desc = next((m.capitalize() for m in mats if m in t), "Material")
         if forn: desc += f" — {forn}"
         return "material", valor, forn, desc, ""
- 
+
     if cat == "imposto":
         valor = extrair_valor(texto)
         if valor <= 0:
             return None, None, None, None, "⚠️ Não encontrei o valor do imposto."
         return "imposto", valor, "", "Imposto / Nota Fiscal", ""
- 
+
     valor = extrair_valor(texto)
     if valor <= 0:
         return None, None, None, None, "⚠️ Não entendi. Tente novamente."
     desc = texto[:50] + ("..." if len(texto) > 50 else "")
     return "outros", valor, "", desc, ""
- 
+
 # ─── HANDLERS ─────────────────────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     teclado = ReplyKeyboardMarkup(
@@ -233,13 +233,13 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=teclado
     )
- 
+
 async def funcionarios_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     dados = carregar(uid)
     funcs = get_funcionarios(dados)
     args = ctx.args
- 
+
     if len(args) == 2:
         funcao_input = args[0].lower()
         funcao = funcao_input
@@ -267,7 +267,7 @@ async def funcionarios_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         return
- 
+
     txt = f"👷 *Seus Funcionários*\n_Base: {DIAS_UTEIS_MES} dias úteis/mês_\n\n"
     for funcao, salario in funcs.items():
         custo = custo_dia(salario)
@@ -278,7 +278,7 @@ async def funcionarios_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt += "`/funcionarios ajudante 1800`\n"
     txt += "`/funcionarios instalador 2200`"
     await update.message.reply_text(txt, parse_mode="Markdown")
- 
+
 async def nova_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     dados = carregar(uid)
@@ -304,7 +304,7 @@ async def nova_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"✅ Obra *{nome}* criada!\n💰 Contrato: *{fmt(valor)}*\n\nAgora me mande os gastos!",
         parse_mode="Markdown"
     )
- 
+
 async def trocar_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     dados = carregar(uid)
@@ -322,7 +322,7 @@ async def trocar_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
     await update.message.reply_text("Obra não encontrada. Use /obras.")
- 
+
 async def listar_obras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     dados = carregar(uid)
@@ -339,7 +339,7 @@ async def listar_obras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         txt += f"   {fmt(obra['valor'])} | Gasto: {fmt(total)} | Lucro: {fmt(lucro)} ({margem:.1f}%)\n"
         txt += f"   `/trocar {obra['nome']}`\n\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
- 
+
 async def resumo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     dados = carregar(uid)
@@ -374,7 +374,7 @@ async def resumo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for l in reversed(lans[-5:]):
         txt += f"• {l['data']} — {l['desc']} — {fmt(l['valor'])}\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
- 
+
 async def apagar_ultimo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     dados = carregar(uid)
@@ -393,7 +393,7 @@ async def apagar_ultimo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🗑️ Removido: *{ultimo['desc']}* — {fmt(ultimo['valor'])}",
         parse_mode="Markdown"
     )
- 
+
 async def relatorio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     dados = carregar(uid)
@@ -422,7 +422,7 @@ async def relatorio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         caption=f"📊 *{obra['nome']}*\n{fmt(obra['valor'])} | Gasto: {fmt(total)} | Lucro: {fmt(lucro)}",
         parse_mode="Markdown"
     )
- 
+
 async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     dados = carregar(uid)
@@ -458,7 +458,7 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt += f"Total: {fmt(total)} ({pct:.1f}%)\n"
     txt += f"{'✅' if lucro>=0 else '🔴'} Lucro: *{fmt(lucro)}* ({mgm:.1f}%)"
     await update.message.reply_text(txt, parse_mode="Markdown")
- 
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     if not TOKEN:
@@ -476,6 +476,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receber_mensagem))
     print("✅ Bot rodando com Firebase + Funcionários!")
     app.run_polling()
- 
+
 if __name__ == "__main__":
     main()
