@@ -53,6 +53,7 @@ ALIASES_FUNCAO = {
     "serralheiro": ["serralheiro", "serralheiros"],
     "ajudante":    ["ajudante", "ajudantes", "auxiliar", "auxiliares"],
     "instalador":  ["instalador", "instaladores", "montador", "montadores"],
+    "cortador":    ["cortador", "cortadores"],
 }
 
 def get_funcionarios(dados):
