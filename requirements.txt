@@ -1,2 +1,6 @@
 python-telegram-bot==20.7
 firebase-admin
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
