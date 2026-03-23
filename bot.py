@@ -3,6 +3,9 @@ import json
 import re
 import base64
 import pytz
+import tempfile
+from openai import OpenAI
+import tempfile
 from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -12,11 +15,14 @@ from firebase_admin import credentials, firestore
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from openai import OpenAI
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 TOKEN = os.environ.get("BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))
 TZ = pytz.timezone("America/Sao_Paulo")
+openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
 # ─── FIREBASE ────────────────────────────────────────────────────────────────
 cred_json = os.environ.get("FIREBASE_CREDENTIALS", "")
@@ -429,6 +435,20 @@ async def job_relatorio_semanal(context):
         txt += f"{emoji} *{obra['nome']}*\n   Contrato: {fmt(obra['valor'])} | Gasto: {pct:.0f}% | Margem: {mgm:.1f}%\n\n"
     await context.bot.send_message(chat_id=OWNER_ID, text=txt, parse_mode="Markdown")
 
+# ─── WHISPER — TRANSCRIÇÃO DE ÁUDIO ──────────────────────────────────────────
+async def transcrever_audio(file_path: str) -> str:
+    try:
+        with open(file_path, "rb") as audio_file:
+            transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="pt"
+            )
+        return transcript.text
+    except Exception as e:
+        print(f"Erro Whisper: {e}")
+        return ""
+
 # ─── HANDLERS ─────────────────────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = ReplyKeyboardMarkup([
@@ -721,6 +741,46 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         txt += f"\n\n🚨 *ATENÇÃO: Obra em {pct:.0f}% do orçamento!*"
     await update.message.reply_text(txt, parse_mode="Markdown")
 
+async def receber_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎤 Transcrevendo seu áudio...")
+    try:
+        voice = update.message.voice or update.message.audio
+        file = await ctx.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            texto = await transcrever_audio(tmp.name)
+        if not texto:
+            await update.message.reply_text("⚠️ Não consegui entender o áudio. Tente novamente.")
+            return
+        await update.message.reply_text(f"🎤 *Entendi:* _{texto}_", parse_mode="Markdown")
+        update.message.text = texto
+        await receber_mensagem(update, ctx)
+    except Exception as e:
+        print(f"Erro audio handler: {e}")
+        await update.message.reply_text("⚠️ Erro ao processar áudio.")
+
+# ─── HANDLER DE ÁUDIO ────────────────────────────────────────────────────────
+async def receber_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎤 Transcrevendo seu áudio...")
+    try:
+        audio = update.message.voice or update.message.audio
+        file = await ctx.bot.get_file(audio.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            with open(tmp.name, "rb") as f:
+                transcript = openai_client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    language="pt"
+                )
+        texto = transcript.text
+        await update.message.reply_text(f"🎤 _\"{texto}\"_", parse_mode="Markdown")
+        update.message.text = texto
+        await receber_mensagem(update, ctx)
+    except Exception as e:
+        print(f"Erro áudio: {e}")
+        await update.message.reply_text("⚠️ Erro ao transcrever áudio. Tente novamente.")
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     if not TOKEN: print("ERRO: BOT_TOKEN não definido!"); return
@@ -734,6 +794,8 @@ def main():
     ]:
         app.add_handler(CommandHandler(cmd, handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receber_mensagem))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, receber_audio))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, receber_audio))
 
     if OWNER_ID:
         jq = app.job_queue
