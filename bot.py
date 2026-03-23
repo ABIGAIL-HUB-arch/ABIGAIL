@@ -1,8 +1,8 @@
 import os
 import json
 import re
-import pickle
 import base64
+import pytz
 from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -10,12 +10,13 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import firebase_admin
 from firebase_admin import credentials, firestore
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-# ─── TOKENS ──────────────────────────────────────────────────────────────────
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
 TOKEN = os.environ.get("BOT_TOKEN", "")
+OWNER_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))
+TZ = pytz.timezone("America/Sao_Paulo")
 
 # ─── FIREBASE ────────────────────────────────────────────────────────────────
 cred_json = os.environ.get("FIREBASE_CREDENTIALS", "")
@@ -31,9 +32,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar",
 ]
-
-GOOGLE_CLIENT_ID = "82433511683-s1liut9i7bpbqq2ou08nqmuuppondj0b.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
 def get_google_creds():
     try:
@@ -68,7 +66,7 @@ def fmt(v):
     return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def hoje():
-    return date.today().strftime("%d/%m/%Y")
+    return datetime.now(TZ).strftime("%d/%m/%Y")
 
 DIAS_UTEIS_MES = 22
 
@@ -98,21 +96,54 @@ def buscar_emails(service, max_r=5):
         emails = []
         for m in msgs:
             d = service.users().messages().get(userId="me", id=m["id"], format="metadata",
-                metadataHeaders=["From","Subject","Date"]).execute()
+                metadataHeaders=["From","Subject","Date","Reply-To"]).execute()
             h = {x["name"]: x["value"] for x in d["payload"]["headers"]}
-            emails.append({"id": m["id"], "de": h.get("From",""), "assunto": h.get("Subject",""), "preview": d.get("snippet","")[:150]})
+            emails.append({
+                "id": m["id"],
+                "de": h.get("From",""),
+                "reply_to": h.get("Reply-To", h.get("From","")),
+                "assunto": h.get("Subject",""),
+                "preview": d.get("snippet","")[:150]
+            })
         return emails
-    except: return []
+    except Exception as e:
+        print(f"Erro buscar emails: {e}")
+        return []
+
+def enviar_email(service, para, assunto, corpo):
+    try:
+        msg = MIMEText(corpo)
+        msg["to"] = para
+        msg["subject"] = assunto
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True
+    except Exception as e:
+        print(f"Erro enviar email: {e}")
+        return False
 
 # ─── CALENDAR HELPERS ─────────────────────────────────────────────────────────
 def buscar_eventos(service, dias=1):
     try:
-        agora = datetime.utcnow().isoformat() + "Z"
-        fim = (datetime.utcnow() + timedelta(days=dias)).isoformat() + "Z"
+        agora = datetime.now(TZ).isoformat()
+        fim = (datetime.now(TZ) + timedelta(days=dias)).isoformat()
         res = service.events().list(calendarId="primary", timeMin=agora, timeMax=fim,
             singleEvents=True, orderBy="startTime").execute()
         return res.get("items", [])
-    except: return []
+    except Exception as e:
+        print(f"Erro buscar eventos: {e}")
+        return []
+
+def buscar_proximos_eventos(service, minutos=40):
+    try:
+        agora = datetime.now(TZ)
+        fim = agora + timedelta(minutes=minutos)
+        res = service.events().list(calendarId="primary",
+            timeMin=agora.isoformat(), timeMax=fim.isoformat(),
+            singleEvents=True, orderBy="startTime").execute()
+        return res.get("items", [])
+    except:
+        return []
 
 def criar_evento_cal(service, titulo, inicio_dt, fim_dt, descricao=""):
     try:
@@ -122,9 +153,53 @@ def criar_evento_cal(service, titulo, inicio_dt, fim_dt, descricao=""):
             "end": {"dateTime": fim_dt, "timeZone": "America/Sao_Paulo"},
         }
         return service.events().insert(calendarId="primary", body=ev).execute().get("htmlLink","")
-    except: return None
+    except Exception as e:
+        print(f"Erro criar evento: {e}")
+        return None
 
-# ─── EXTRATORES ───────────────────────────────────────────────────────────────
+# ─── PARSER DE DATAS ──────────────────────────────────────────────────────────
+DIAS_SEMANA = {
+    "segunda": 0, "terca": 1, "terça": 1, "quarta": 2,
+    "quinta": 3, "sexta": 4, "sabado": 5, "sábado": 5, "domingo": 6
+}
+
+def parse_data_hora(texto):
+    t = texto.lower()
+    agora = datetime.now(TZ)
+    hora_m = re.search(r'(\d{1,2})h(?:(\d{2}))?', t)
+    hora = int(hora_m.group(1)) if hora_m else 9
+    minuto = int(hora_m.group(2)) if hora_m and hora_m.group(2) else 0
+    if "hoje" in t:
+        data = agora.date()
+    elif "amanhã" in t or "amanha" in t:
+        data = (agora + timedelta(days=1)).date()
+    else:
+        data = None
+        for dia_nome, dia_num in DIAS_SEMANA.items():
+            if dia_nome in t:
+                dias_frente = (dia_num - agora.weekday()) % 7
+                if dias_frente == 0: dias_frente = 7
+                data = (agora + timedelta(days=dias_frente)).date()
+                break
+        dm = re.search(r'(\d{1,2})/(\d{1,2})', t)
+        if dm:
+            data = date(agora.year, int(dm.group(2)), int(dm.group(1)))
+        if not data:
+            data = (agora + timedelta(days=1)).date()
+    inicio = TZ.localize(datetime(data.year, data.month, data.day, hora, minuto))
+    fim = inicio + timedelta(hours=1)
+    return inicio.isoformat(), fim.isoformat()
+
+def extrair_titulo_evento(texto):
+    t = texto
+    for w in ["agendar","agenda","criar evento","marcar","reunião com","reuniao com","compromisso com"]:
+        t = re.sub(w, "", t, flags=re.IGNORECASE)
+    t = re.sub(r'\b(hoje|amanhã|amanha|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado|domingo)\b', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\d{1,2}h\d{0,2}', '', t)
+    t = re.sub(r'\d{1,2}/\d{1,2}', '', t)
+    return t.strip(" —-,.") [:60] or "Compromisso"
+
+# ─── EXTRATORES DE OBRA ───────────────────────────────────────────────────────
 def extrair_valor(texto):
     t = texto.lower()
     m = re.search(r'(\d+(?:[.,]\d+)?)\s*mil', t)
@@ -162,12 +237,16 @@ def extrair_forn(texto):
 PALAVRAS_MAO = ["serralheiro","ajudante","instalador","cortador","montador","mao de obra","mão de obra","fabricação","fabricacao","instalação","instalacao","fábrica","fabrica","dias de","dia de"]
 PALAVRAS_IMP = ["imposto","nota fiscal","nf ","inss","iss","icms","simples","tributo","taxa","das"]
 PALAVRAS_MAT = ["aluminio","alumínio","vidro","acessorio","acessório","ferragem","perfil","borracha","silicone","parafuso","chapa","kit","material","fita","fechadura","trilho","selante","espelho"]
-PALAVRAS_EMAIL = ["email","e-mail","emails","mensagem","caixa","gmail","não lido","nao lido"]
+PALAVRAS_EMAIL = ["email","e-mail","emails","mensagem","caixa","gmail","não lido","nao lido","responde","responder","responda"]
 PALAVRAS_AGENDA = ["agenda","reunião","reuniao","compromisso","evento","calendário","calendario","hoje","amanhã","amanha","agendar","marcar","horário"]
 PALAVRAS_TAREFA = ["tarefa","lembrar","lembrete","cobrar","pendente","prazo"]
 
 def cat_geral(texto):
     t = texto.lower()
+    if any(p in t for p in ["agendar","criar reunião","criar evento","marcar reunião","marcar evento"]):
+        return "criar_evento"
+    if any(p in t for p in ["responde","responder","responda"]) and any(p in t for p in ["email","e-mail","dizendo","falando"]):
+        return "responder_email"
     for p in PALAVRAS_EMAIL:
         if p in t: return "email"
     for p in PALAVRAS_AGENDA:
@@ -224,6 +303,120 @@ def processar_lancamento(texto, funcionarios):
     if v <= 0: return None,None,None,None,"⚠️ Não entendi. Tente novamente."
     return "outros", v, "", texto[:50], ""
 
+# ─── JOBS AGENDADOS ───────────────────────────────────────────────────────────
+async def job_bom_dia(context):
+    """Todo dia às 7h — bom dia + agenda + alertas"""
+    svc = get_calendar()
+    eventos = buscar_eventos(svc, 1) if svc else []
+    txt = f"☀️ *Bom dia, Samuel!*\n📅 *{hoje()}*\n\n"
+    if eventos:
+        txt += "📋 *Sua agenda hoje:*\n"
+        for e in eventos:
+            ini = e["start"].get("dateTime","")
+            hora = ini[11:16] if "T" in ini else "Dia todo"
+            txt += f"🕐 *{hora}* — {e.get('summary','')}\n"
+    else:
+        txt += "📅 Agenda livre hoje! ✅\n"
+    dados = carregar(OWNER_ID)
+    pendentes = [t for t in dados.get("tarefas",[]) if not t.get("concluida")]
+    if pendentes:
+        txt += f"\n⚠️ *{len(pendentes)} tarefa(s) pendente(s)* — /tarefas"
+    alertas = []
+    for oid, obra in dados.get("obras",{}).items():
+        lans = obra.get("lancamentos",[])
+        total = sum(l["valor"] for l in lans)
+        pct = (total/obra["valor"]*100) if obra["valor"] > 0 else 0
+        if pct >= 80:
+            alertas.append(f"🔴 *{obra['nome']}*: {pct:.0f}% do orçamento usado")
+    if alertas:
+        txt += "\n\n🚨 *Alertas de obra:*\n" + "\n".join(alertas)
+    txt += "\n\n_Tenha um ótimo dia!_ 💪"
+    await context.bot.send_message(chat_id=OWNER_ID, text=txt, parse_mode="Markdown")
+
+async def job_lembrete_agenda(context):
+    """A cada 15 min — lembra compromissos em ~30 min"""
+    svc = get_calendar()
+    if not svc: return
+    agora = datetime.now(TZ)
+    eventos = buscar_proximos_eventos(svc, 40)
+    for e in eventos:
+        ini_str = e["start"].get("dateTime","")
+        if not ini_str: continue
+        try:
+            ini = datetime.fromisoformat(ini_str)
+            if ini.tzinfo is None:
+                ini = TZ.localize(ini)
+            diff = (ini - agora).total_seconds() / 60
+            if 25 <= diff <= 35:
+                titulo = e.get("summary","Compromisso")
+                hora = ini_str[11:16]
+                await context.bot.send_message(
+                    chat_id=OWNER_ID,
+                    text=f"⏰ *Lembrete!*\n\n📅 *{titulo}*\nDaqui a ~30 minutos ({hora})\n\n_Prepare-se!_ 💼",
+                    parse_mode="Markdown"
+                )
+        except Exception as ex:
+            print(f"Erro lembrete: {ex}")
+
+async def job_resumo_emails(context):
+    """A cada 3h — resumo de e-mails importantes"""
+    svc = get_gmail()
+    if not svc: return
+    emails = buscar_emails(svc, 8)
+    if not emails: return
+    spam = ["desconto","promoção","oferta","newsletter","unsubscribe","cupom","linkedin","pinterest","noreply"]
+    importantes = [e for e in emails if not any(w in (e["assunto"]+e["de"]).lower() for w in spam)]
+    if not importantes: return
+    txt = f"📧 *{len(importantes)} e-mail(s) importante(s):*\n\n"
+    for i, e in enumerate(importantes[:4], 1):
+        txt += f"*{i}.* {e['assunto'][:50]}\n   _{e['de'][:35]}_\n   {e['preview'][:80]}\n\n"
+    await context.bot.send_message(chat_id=OWNER_ID, text=txt, parse_mode="Markdown")
+
+async def job_cobrar_tarefas(context):
+    """Todo dia às 9h — cobra tarefas vencidas"""
+    dados = carregar(OWNER_ID)
+    hoje_dt = datetime.now(TZ).date()
+    vencidas = []
+    for t in dados.get("tarefas", []):
+        if t.get("concluida"): continue
+        prazo = t.get("prazo","")
+        if prazo:
+            for fmt_prazo in ["%d/%m/%Y", "%d/%m"]:
+                try:
+                    ano = hoje_dt.year
+                    prazo_dt = datetime.strptime(prazo if "/" in prazo and len(prazo) > 5 else f"{prazo}/{ano}", "%d/%m/%Y").date()
+                    if prazo_dt < hoje_dt:
+                        vencidas.append(t)
+                    break
+                except: pass
+    if not vencidas: return
+    txt = "🚨 *Tarefas vencidas!*\n\n"
+    for t in vencidas:
+        resp = f" — *{t['responsavel']}*" if t.get("responsavel") else ""
+        txt += f"• {t['descricao'][:60]}{resp}\n"
+    txt += "\n_Use /tarefas para ver todas_ 📋"
+    await context.bot.send_message(chat_id=OWNER_ID, text=txt, parse_mode="Markdown")
+
+async def job_relatorio_semanal(context):
+    """Toda segunda às 8h — resumo de obras"""
+    if datetime.now(TZ).weekday() != 0: return  # só segunda
+    dados = carregar(OWNER_ID)
+    obras = dados.get("obras", {})
+    if not obras: return
+    txt = "📊 *Relatório Semanal — Obras*\n\n"
+    obras_ord = sorted(obras.items(), key=lambda x: (
+        (sum(l["valor"] for l in x[1].get("lancamentos",[])) / x[1]["valor"] * 100) if x[1]["valor"] > 0 else 0
+    ), reverse=True)
+    for oid, obra in obras_ord:
+        lans = obra.get("lancamentos",[])
+        total = sum(l["valor"] for l in lans)
+        lucro = obra["valor"] - total
+        pct = (total/obra["valor"]*100) if obra["valor"] > 0 else 0
+        mgm = (lucro/obra["valor"]*100) if obra["valor"] > 0 else 0
+        emoji = "🔴" if pct >= 80 else "🟡" if pct >= 60 else "🟢"
+        txt += f"{emoji} *{obra['nome']}*\n   Contrato: {fmt(obra['valor'])} | Gasto: {pct:.0f}% | Margem: {mgm:.1f}%\n\n"
+    await context.bot.send_message(chat_id=OWNER_ID, text=txt, parse_mode="Markdown")
+
 # ─── HANDLERS ─────────────────────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = ReplyKeyboardMarkup([
@@ -235,9 +428,11 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏗️ *Abigail 2.0* — Assistente Executiva!\n\n"
         "📋 *Obras:* _Alumínio BPA R$ 40.000_ | _Serralheiro 2 dias fábrica_\n"
-        "📅 *Agenda:* /agenda ou _ver minha agenda hoje_\n"
-        "📧 *E-mails:* /emails ou _ver meus emails_\n"
-        "✅ *Tarefas:* /tarefas ou _Tarefa: Pablo levantar material até sexta_\n"
+        "📅 *Ver agenda:* /agenda\n"
+        "📅 *Criar evento:* _Agendar reunião com Pablo sexta 14h_\n"
+        "📧 *Ver e-mails:* /emails\n"
+        "📧 *Responder:* _Responde Paulo dizendo que confirmo a reunião_\n"
+        "✅ *Tarefas:* /tarefas | _Tarefa: Pablo levantar material até sexta_\n"
         "👷 *Funcionários:* /funcionarios\n\n"
         "_Estou aqui pra te ajudar a focar no que importa!_ 💪",
         parse_mode="Markdown", reply_markup=kb
@@ -247,12 +442,10 @@ async def agenda_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Buscando sua agenda...")
     svc = get_calendar()
     if not svc:
-        await update.message.reply_text("⚠️ Google Agenda não conectado ainda.\n\nVou te guiar para conectar em breve!", parse_mode="Markdown")
-        return
+        await update.message.reply_text("⚠️ Google Agenda não conectado."); return
     eventos = buscar_eventos(svc, 1)
     if not eventos:
-        await update.message.reply_text(f"📅 Nenhum compromisso hoje ({hoje()})! Dia livre ✅")
-        return
+        await update.message.reply_text(f"📅 Nenhum compromisso hoje ({hoje()})! Dia livre ✅"); return
     txt = f"📅 *Agenda de hoje — {hoje()}:*\n\n"
     for e in eventos:
         ini = e["start"].get("dateTime", "")
@@ -264,16 +457,13 @@ async def emails_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📧 Buscando e-mails não lidos...")
     svc = get_gmail()
     if not svc:
-        await update.message.reply_text("⚠️ Gmail não conectado ainda.\n\nVou te guiar para conectar em breve!", parse_mode="Markdown")
-        return
+        await update.message.reply_text("⚠️ Gmail não conectado."); return
     emails = buscar_emails(svc, 5)
     if not emails:
-        await update.message.reply_text("📧 Nenhum e-mail não lido! Caixa limpa ✅")
-        return
+        await update.message.reply_text("📧 Nenhum e-mail não lido! Caixa limpa ✅"); return
     txt = "📧 *E-mails não lidos:*\n\n"
     for i, e in enumerate(emails, 1):
-        de = e["de"][:35]
-        txt += f"*{i}.* {e['assunto'][:50]}\n   _{de}_\n   {e['preview'][:80]}...\n\n"
+        txt += f"*{i}.* {e['assunto'][:50]}\n   _{e['de'][:35]}_\n   {e['preview'][:80]}...\n\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 async def tarefas_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -281,8 +471,7 @@ async def tarefas_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     dados = carregar(uid)
     pendentes = [t for t in dados.get("tarefas", []) if not t.get("concluida")]
     if not pendentes:
-        await update.message.reply_text("✅ Nenhuma tarefa pendente! Tudo em dia.")
-        return
+        await update.message.reply_text("✅ Nenhuma tarefa pendente! Tudo em dia."); return
     txt = "✅ *Tarefas pendentes:*\n\n"
     for i, t in enumerate(pendentes, 1):
         resp = f" — *{t['responsavel']}*" if t.get("responsavel") else ""
@@ -318,8 +507,7 @@ async def nova_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texto = " ".join(ctx.args) if ctx.args else ""
     partes = re.split(r'\s*[-—–]\s*', texto, 1)
     if len(partes) < 2:
-        await update.message.reply_text("Formato: `/nova_obra Nome — Valor`\nEx: `/nova_obra João Silva — 100000`", parse_mode="Markdown")
-        return
+        await update.message.reply_text("Formato: `/nova_obra Nome — Valor`\nEx: `/nova_obra João Silva — 100000`", parse_mode="Markdown"); return
     nome, valor = partes[0].strip(), extrair_valor(partes[1])
     if not nome or valor <= 0:
         await update.message.reply_text("Nome ou valor inválido."); return
@@ -338,8 +526,7 @@ async def trocar_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if busca in obra["nome"].lower():
             dados["obra_atual"] = oid
             salvar(uid, dados)
-            await update.message.reply_text(f"✅ Obra ativa: *{obra['nome']}*", parse_mode="Markdown")
-            return
+            await update.message.reply_text(f"✅ Obra ativa: *{obra['nome']}*", parse_mode="Markdown"); return
     await update.message.reply_text("Obra não encontrada. Use /obras.")
 
 async def listar_obras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -416,10 +603,53 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     cat = cat_geral(texto)
 
+    # ── Criar evento na agenda ─────────────────────────────────────────────
+    if cat == "criar_evento":
+        svc = get_calendar()
+        if not svc:
+            await update.message.reply_text("⚠️ Google Agenda não conectado."); return
+        titulo = extrair_titulo_evento(texto)
+        inicio, fim = parse_data_hora(texto)
+        link = criar_evento_cal(svc, titulo, inicio, fim)
+        hora = inicio[11:16]
+        data_fmt = f"{inicio[8:10]}/{inicio[5:7]}/{inicio[:4]}"
+        if link:
+            await update.message.reply_text(
+                f"📅 *Evento criado!*\n\n📌 *{titulo}*\n🗓️ {data_fmt} às {hora}\n\n✅ Adicionado ao Google Agenda!",
+                parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ Erro ao criar evento. Tente novamente.")
+        return
+
+    # ── Responder e-mail ───────────────────────────────────────────────────
+    if cat == "responder_email":
+        svc = get_gmail()
+        if not svc:
+            await update.message.reply_text("⚠️ Gmail não conectado."); return
+        m = re.search(r'(?:responde?|responda)\s+(?:o\s+|a\s+|ao\s+)?([A-Za-záéíóúâêôãõ]+)\s+(?:dizendo|falando|que|:)\s+(.+)', texto, re.IGNORECASE)
+        if not m:
+            await update.message.reply_text("Formato: _Responde Paulo dizendo que confirmo a reunião_", parse_mode="Markdown"); return
+        nome_dest = m.group(1)
+        corpo = m.group(2)
+        emails = buscar_emails(svc, 10)
+        dest = next((e for e in emails if nome_dest.lower() in e["de"].lower()), None)
+        if not dest:
+            await update.message.reply_text(f"⚠️ Não encontrei e-mail recente de *{nome_dest}*.", parse_mode="Markdown"); return
+        assunto = f"Re: {dest['assunto']}"
+        email_m = re.search(r'<(.+?)>', dest["reply_to"])
+        para = email_m.group(1) if email_m else dest["reply_to"]
+        ok = enviar_email(svc, para, assunto, corpo)
+        if ok:
+            await update.message.reply_text(f"📧 *E-mail enviado!*\n\nPara: _{para}_\nAssunto: _{assunto}_", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ Erro ao enviar e-mail.")
+        return
+
+    # ── Ver e-mails ────────────────────────────────────────────────────────
     if cat == "email":
         svc = get_gmail()
         if not svc:
-            await update.message.reply_text("⚠️ Gmail não conectado ainda. Em breve te ajudo a conectar!"); return
+            await update.message.reply_text("⚠️ Gmail não conectado."); return
         emails = buscar_emails(svc, 3)
         if not emails: await update.message.reply_text("📧 Nenhum e-mail não lido! ✅"); return
         txt = "📧 *E-mails recentes:*\n\n"
@@ -427,10 +657,11 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             txt += f"*{i}.* {e['assunto'][:50]}\n   _{e['de'][:35]}_\n   {e['preview'][:80]}\n\n"
         await update.message.reply_text(txt, parse_mode="Markdown"); return
 
+    # ── Ver agenda ─────────────────────────────────────────────────────────
     if cat == "agenda":
         svc = get_calendar()
         if not svc:
-            await update.message.reply_text("⚠️ Agenda não conectada ainda. Em breve te ajudo a conectar!"); return
+            await update.message.reply_text("⚠️ Agenda não conectada."); return
         eventos = buscar_eventos(svc, 1)
         if not eventos: await update.message.reply_text(f"📅 Nenhum compromisso hoje! ✅"); return
         txt = f"📅 *Agenda de hoje:*\n\n"
@@ -440,9 +671,10 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             txt += f"🕐 *{hora}* — {e.get('summary','')}\n"
         await update.message.reply_text(txt, parse_mode="Markdown"); return
 
+    # ── Tarefa ─────────────────────────────────────────────────────────────
     if cat == "tarefa":
         desc = texto.replace("tarefa:","").replace("Tarefa:","").strip()
-        prazo_m = re.search(r'até\s+(\w+\s*\w*)', texto.lower())
+        prazo_m = re.search(r'até\s+(\S+(?:\s+\S+)?)', texto.lower())
         resp_m = re.search(r'(?:para|com|cobrar)\s+([A-Z][a-zA-Z]+)', texto)
         t = {"id": f"t_{int(datetime.now().timestamp())}", "descricao": desc[:100],
              "responsavel": resp_m.group(1) if resp_m else "",
@@ -454,6 +686,7 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         p = f" até *{t['prazo']}*" if t["prazo"] else ""
         await update.message.reply_text(f"✅ Tarefa criada{r}{p}!\n📌 _{desc[:80]}_", parse_mode="Markdown"); return
 
+    # ── Lançamento de obra ─────────────────────────────────────────────────
     oid = dados.get("obra_atual")
     if not oid or oid not in dados.get("obras", {}):
         await update.message.reply_text("⚠️ Nenhuma obra ativa!\n\n`/nova_obra Nome — 100000`", parse_mode="Markdown"); return
@@ -472,12 +705,15 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mgm = (lucro/obra["valor"]*100) if obra["valor"] > 0 else 0
     labels = {"material":"🔩 Material","hh_fabricacao":"🏭 MO Fabricação","hh_instalacao":"🔧 MO Instalação","imposto":"🧾 Imposto","outros":"📦 Outros"}
     txt = f"✅ *{labels.get(cat_obra,'📦')}* lançado!{extra}\n\n📌 {desc}\n💰 *{fmt(valor)}*\n\n📊 *{obra['nome']}:*\nTotal: {fmt(total)} ({pct:.1f}%)\n{'✅' if lucro>=0 else '🔴'} Lucro: *{fmt(lucro)}* ({mgm:.1f}%)"
+    if pct >= 80:
+        txt += f"\n\n🚨 *ATENÇÃO: Obra em {pct:.0f}% do orçamento!*"
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     if not TOKEN: print("ERRO: BOT_TOKEN não definido!"); return
     app = Application.builder().token(TOKEN).build()
+
     for cmd, handler in [
         ("start", start), ("nova_obra", nova_obra), ("trocar", trocar_obra),
         ("obras", listar_obras), ("resumo", resumo), ("relatorio", relatorio),
@@ -486,7 +722,22 @@ def main():
     ]:
         app.add_handler(CommandHandler(cmd, handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receber_mensagem))
-    print("✅ Abigail 2.0 — Gmail + Calendar + Obras + Tarefas!")
+
+    if OWNER_ID:
+        jq = app.job_queue
+        # Bom dia 7h (Brasília = 10h UTC)
+        jq.run_daily(job_bom_dia, time=datetime.strptime("10:00", "%H:%M").replace(tzinfo=pytz.utc).timetz())
+        # Lembrete a cada 15 min
+        jq.run_repeating(job_lembrete_agenda, interval=900, first=60)
+        # Resumo de e-mails a cada 3h
+        jq.run_repeating(job_resumo_emails, interval=10800, first=300)
+        # Cobrar tarefas 9h (12h UTC)
+        jq.run_daily(job_cobrar_tarefas, time=datetime.strptime("12:00", "%H:%M").replace(tzinfo=pytz.utc).timetz())
+        # Relatório semanal segunda 8h (11h UTC)
+        jq.run_daily(job_relatorio_semanal, time=datetime.strptime("11:00", "%H:%M").replace(tzinfo=pytz.utc).timetz())
+        print(f"✅ Jobs agendados para OWNER_ID: {OWNER_ID}")
+
+    print("✅ Abigail 2.0 — Assistente Executiva Completa!")
     app.run_polling()
 
 if __name__ == "__main__":
