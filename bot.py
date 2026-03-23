@@ -166,9 +166,21 @@ DIAS_SEMANA = {
 def parse_data_hora(texto):
     t = texto.lower()
     agora = datetime.now(TZ)
-    hora_m = re.search(r'(\d{1,2})h(?:(\d{2}))?', t)
-    hora = int(hora_m.group(1)) if hora_m else 9
-    minuto = int(hora_m.group(2)) if hora_m and hora_m.group(2) else 0
+    hora, minuto = 9, 0
+    hora_m = re.search(r'(\d{1,2})h(\d{2})', t)
+    if hora_m:
+        hora = int(hora_m.group(1))
+        minuto = int(hora_m.group(2))
+    else:
+        hora_m = re.search(r'(\d{1,2})h', t)
+        if hora_m:
+            hora = int(hora_m.group(1))
+            minuto = 0
+        else:
+            hora_m = re.search(r'(\d{1,2}):(\d{2})', t)
+            if hora_m:
+                hora = int(hora_m.group(1))
+                minuto = int(hora_m.group(2))
     if "hoje" in t:
         data = agora.date()
     elif "amanhã" in t or "amanha" in t:
