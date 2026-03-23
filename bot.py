@@ -37,16 +37,12 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
 def get_google_creds():
     try:
-        doc = db.collection("config").document("google_token").get()
-        if doc.exists:
-            token_b64 = doc.to_dict().get("token", "")
-            if token_b64:
-                creds = pickle.loads(base64.b64decode(token_b64))
-                if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                    token_b64 = base64.b64encode(pickle.dumps(creds)).decode()
-                    db.collection("config").document("google_token").set({"token": token_b64})
-                return creds
+        token_json = os.environ.get("GOOGLE_TOKEN", "")
+        if token_json:
+            creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            return creds
     except Exception as e:
         print(f"Erro get creds: {e}")
     return None
