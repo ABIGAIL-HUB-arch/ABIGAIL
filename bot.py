@@ -434,7 +434,201 @@ async def job_relatorio_semanal(context):
         emoji = "🔴" if pct >= 80 else "🟡" if pct >= 60 else "🟢"
         txt += f"{emoji} *{obra['nome']}*\n   Contrato: {fmt(obra['valor'])} | Gasto: {pct:.0f}% | Margem: {mgm:.1f}%\n\n"
     await context.bot.send_message(chat_id=OWNER_ID, text=txt, parse_mode="Markdown")
+# ─── GLASS CARE — JOB AUTOMÁTICO ─────────────────────────────────────────────
+# Adicionar este código no bot.py do Abigail, junto com os outros jobs
+# Também adicionar no main() junto com os outros job_queue.run_repeating
 
+import requests as http_requests  # adicionar no topo se não existir
+
+# Credenciais Z-API (já deve ter no Railway como variável de ambiente)
+ZAPI_INSTANCE = "3F1C150EF6D64265EAE5B20DE66F3711"
+ZAPI_TOKEN    = "D9A13E7A8251463E924D1F5D"
+ZAPI_CLIENT_TOKEN = "F606b47239c674ca68ca604acb5f98c3eS"
+ZAPI_URL      = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-text"
+MEU_NUMERO    = "5531983039481"
+
+
+def enviar_whatsapp(telefone: str, mensagem: str) -> bool:
+    """Envia mensagem WhatsApp via Z-API"""
+    fone = "55" + telefone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    try:
+        r = http_requests.post(
+            ZAPI_URL,
+            headers={
+                "Content-Type": "application/json",
+                "client-token": ZAPI_CLIENT_TOKEN
+            },
+            json={"phone": fone, "message": mensagem},
+            timeout=15
+        )
+        data = r.json()
+        if data.get("error"):
+            print(f"Z-API erro: {data['error']}")
+            return False
+        return True
+    except Exception as e:
+        print(f"Erro Z-API: {e}")
+        return False
+
+
+def notificar_samuel(mensagem: str) -> bool:
+    """Notifica Samuel no WhatsApp pessoal"""
+    return enviar_whatsapp(MEU_NUMERO, mensagem)
+
+
+async def job_glass_care(context):
+    """
+    Todo dia às 8h — verifica manutenções Glass Care no Firebase.
+    - 7 dias antes: envia WhatsApp ao cliente
+    - No dia: lembra Samuel no Telegram
+    - Após 30 dias da entrega sem lembrete: envia pesquisa de satisfação
+    """
+    from datetime import date, timedelta
+
+    hoje_dt = date.today()
+    em_7_dias = hoje_dt + timedelta(days=7)
+    em_7_str  = em_7_dias.isoformat()
+    hoje_str  = hoje_dt.isoformat()
+
+    alertas_telegram = []
+
+    try:
+        # Busca todas as obras no Firebase
+        obras_ref = db.collection("obras").stream()
+
+        for doc in obras_ref:
+            obra = doc.to_dict()
+            obra_id = doc.id
+            nome_obra   = obra.get("nome", obra.get("cliente", "Obra sem nome"))
+            cliente     = obra.get("nomeCliente", obra.get("cliente", "cliente"))
+            whatsapp    = obra.get("whatsappCliente", "")
+            entrega     = obra.get("dataEntregaReal", "")
+            pos_obra    = obra.get("posObra", {})
+            manutencoes = pos_obra.get("manutencaoGC", [])
+            lembrete30  = pos_obra.get("lembrete30", False)
+
+            # ── 1. Lembrete de satisfação 30 dias após entrega ───────────────
+            if entrega and not lembrete30 and whatsapp:
+                try:
+                    entrega_dt = date.fromisoformat(entrega)
+                    dias_desde = (hoje_dt - entrega_dt).days
+                    if dias_desde == 30:
+                        msg = (
+                            f"Olá {cliente}! 😊\n\n"
+                            f"A *Fermet Esquadrias* passou 30 dias desde a entrega da sua obra "
+                            f"e gostaríamos de saber:\n\n"
+                            f"✅ Como estão funcionando as esquadrias?\n"
+                            f"✅ Ficou satisfeito com o resultado?\n"
+                            f"✅ Tem alguma dúvida ou necessidade de ajuste?\n\n"
+                            f"Estamos à disposição para garantir sua satisfação! 🏗️\n\n"
+                            f"*Fermet — 42 anos de excelência em esquadrias metálicas*"
+                        )
+                        if enviar_whatsapp(whatsapp, msg):
+                            # Marca lembrete como enviado no Firebase
+                            db.collection("obras").document(obra_id).update({
+                                "posObra.lembrete30": True
+                            })
+                            alertas_telegram.append(
+                                f"📞 *Pesquisa 30 dias enviada!*\n"
+                                f"Obra: {nome_obra}\nCliente: {cliente}"
+                            )
+                except Exception as e:
+                    print(f"Erro lembrete30 {obra_id}: {e}")
+
+            # ── 2. Manutenções Glass Care próximas ───────────────────────────
+            atualizadas = False
+            for i, m in enumerate(manutencoes):
+                data_m = m.get("data", "")
+                concluida = m.get("concluida", False)
+                wp_enviado = m.get("whatsappEnviado", False)
+
+                if concluida or not data_m:
+                    continue
+
+                try:
+                    data_m_dt = date.fromisoformat(data_m)
+                    data_m_fmt = data_m_dt.strftime("%d/%m/%Y")
+                except:
+                    continue
+
+                # 7 dias antes — envia WhatsApp ao cliente
+                if data_m == em_7_str and not wp_enviado and whatsapp:
+                    msg = (
+                        f"Olá {cliente}! 👋\n\n"
+                        f"A *Fermet Esquadrias* entrará em contato para agendar "
+                        f"a manutenção preventiva das suas esquadrias e limpeza dos vidros.\n\n"
+                        f"📅 *Data prevista:* {data_m_fmt}\n\n"
+                        f"Por favor, confirme sua disponibilidade respondendo "
+                        f"*SIM* para confirmar ou *NÃO* para reagendarmos.\n\n"
+                        f"Qualquer dúvida estamos à disposição! 🪟"
+                    )
+                    if enviar_whatsapp(whatsapp, msg):
+                        manutencoes[i]["whatsappEnviado"] = True
+                        manutencoes[i]["dataEnvio"] = hoje_str
+                        atualizadas = True
+                        alertas_telegram.append(
+                            f"🪟 *Glass Care enviado ao cliente!*\n"
+                            f"Obra: {nome_obra}\nCliente: {cliente}\n"
+                            f"Manutenção: {data_m_fmt}\n"
+                            f"Aguardando confirmação."
+                        )
+
+                # No dia da manutenção — lembra Samuel no Telegram
+                elif data_m == hoje_str and not concluida:
+                    alertas_telegram.append(
+                        f"🪟 *HOJE — Manutenção Glass Care!*\n"
+                        f"Obra: {nome_obra}\nCliente: {cliente}\n"
+                        f"📞 {whatsapp or 'sem WhatsApp cadastrado'}\n"
+                        f"Verifique se o técnico foi agendado!"
+                    )
+
+                # 1 dia antes — lembra Samuel
+                elif (date.fromisoformat(data_m) - hoje_dt).days == 1 and not concluida:
+                    alertas_telegram.append(
+                        f"⏰ *AMANHÃ — Manutenção Glass Care!*\n"
+                        f"Obra: {nome_obra}\nCliente: {cliente}\n"
+                        f"Data: {data_m_fmt}\n"
+                        f"Confirme o técnico!"
+                    )
+
+            # Salva atualizações no Firebase
+            if atualizadas:
+                db.collection("obras").document(obra_id).update({
+                    "posObra.manutencaoGC": manutencoes
+                })
+
+    except Exception as e:
+        print(f"Erro job_glass_care: {e}")
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"⚠️ Erro no job Glass Care: {e}",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Envia todos os alertas no Telegram
+    if alertas_telegram:
+        txt = "🪟 *Glass Care — Relatório Diário*\n\n"
+        txt += "\n\n".join(alertas_telegram)
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=txt,
+            parse_mode="Markdown"
+        )
+
+
+# ─── REGISTRAR O JOB NO main() ────────────────────────────────────────────────
+# Dentro da função main(), junto com os outros job_queue, adicione:
+#
+#   # Glass Care — todo dia às 8h (após o bom dia)
+#   job_queue.run_daily(
+#       job_glass_care,
+#       time=datetime_time(8, 10, tzinfo=TZ),  # 8h10 horário BH
+#       name="glass_care"
+#   )
+#
+# Certifique-se que no topo do arquivo tem:
+#   from datetime import time as datetime_time
 # ─── WHISPER — TRANSCRIÇÃO DE ÁUDIO ──────────────────────────────────────────
 async def transcrever_audio(file_path: str) -> str:
     try:
