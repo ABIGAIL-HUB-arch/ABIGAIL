@@ -4,9 +4,9 @@ import re
 import base64
 import pytz
 import tempfile
+import requests as http_requests
 from openai import OpenAI
-import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as datetime_time
 from email.mime.text import MIMEText
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -15,16 +15,42 @@ from firebase_admin import credentials, firestore
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from openai import OpenAI
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-TOKEN = os.environ.get("BOT_TOKEN", "")
+TOKEN    = os.environ.get("BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))
-TZ = pytz.timezone("America/Sao_Paulo")
-openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+TZ       = pytz.timezone("America/Sao_Paulo")
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
-# ─── FIREBASE ────────────────────────────────────────────────────────────────
+# ─── Z-API — GLASS CARE ───────────────────────────────────────────────────────
+ZAPI_INSTANCE    = "3F1C150EF6D64265EAE5B20DE66F3711"
+ZAPI_TOKEN       = "D9A13E7A8251463E924D1F5D"
+ZAPI_CLIENT_TOKEN= "F606b47239c674ca68ca604acb5f98c3eS"
+ZAPI_URL         = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-text"
+MEU_NUMERO       = "5531983039481"
+
+def enviar_whatsapp(telefone: str, mensagem: str) -> bool:
+    fone = "55" + re.sub(r"\D", "", telefone)
+    try:
+        r = http_requests.post(
+            ZAPI_URL,
+            headers={"Content-Type": "application/json", "client-token": ZAPI_CLIENT_TOKEN},
+            json={"phone": fone, "message": mensagem},
+            timeout=15
+        )
+        data = r.json()
+        if data.get("error"):
+            print(f"Z-API erro: {data['error']}")
+            return False
+        return True
+    except Exception as e:
+        print(f"Erro Z-API: {e}")
+        return False
+
+def notificar_samuel(mensagem: str) -> bool:
+    return enviar_whatsapp(MEU_NUMERO, mensagem)
+
+# ─── FIREBASE ─────────────────────────────────────────────────────────────────
 cred_json = os.environ.get("FIREBASE_CREDENTIALS", "")
 if cred_json:
     cred_dict = json.loads(cred_json)
@@ -175,18 +201,15 @@ def parse_data_hora(texto):
     hora, minuto = 9, 0
     hora_m = re.search(r'(\d{1,2})h(\d{2})', t)
     if hora_m:
-        hora = int(hora_m.group(1))
-        minuto = int(hora_m.group(2))
+        hora = int(hora_m.group(1)); minuto = int(hora_m.group(2))
     else:
         hora_m = re.search(r'(\d{1,2})h', t)
         if hora_m:
-            hora = int(hora_m.group(1))
-            minuto = 0
+            hora = int(hora_m.group(1)); minuto = 0
         else:
             hora_m = re.search(r'(\d{1,2}):(\d{2})', t)
             if hora_m:
-                hora = int(hora_m.group(1))
-                minuto = int(hora_m.group(2))
+                hora = int(hora_m.group(1)); minuto = int(hora_m.group(2))
     if "hoje" in t:
         data = agora.date()
     elif "amanhã" in t or "amanha" in t:
@@ -215,7 +238,7 @@ def extrair_titulo_evento(texto):
     t = re.sub(r'\b(hoje|amanhã|amanha|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado|domingo)\b', '', t, flags=re.IGNORECASE)
     t = re.sub(r'\d{1,2}h\d{0,2}', '', t)
     t = re.sub(r'\d{1,2}/\d{1,2}', '', t)
-    return t.strip(" —-,.") [:60] or "Compromisso"
+    return t.strip(" —-,.")[:60] or "Compromisso"
 
 # ─── EXTRATORES DE OBRA ───────────────────────────────────────────────────────
 def extrair_valor(texto):
@@ -252,12 +275,12 @@ def extrair_forn(texto):
     m = re.search(r'(?:na|da|do|no|em|pela|pelo|empresa)\s+([A-ZÁÉÍÓÚÂÊÔÃÕ][A-Za-záéíóúâêôãõüç\s&\-]{1,30}?)(?:\s+por|,|\.|\s+[rR]\$|$)', texto)
     return m.group(1).strip() if m else ""
 
-PALAVRAS_MAO = ["serralheiro","ajudante","instalador","cortador","montador","mao de obra","mão de obra","fabricação","fabricacao","instalação","instalacao","fábrica","fabrica","dias de","dia de"]
-PALAVRAS_IMP = ["imposto","nota fiscal","nf ","inss","iss","icms","simples","tributo","taxa","das"]
-PALAVRAS_MAT = ["aluminio","alumínio","vidro","acessorio","acessório","ferragem","perfil","borracha","silicone","parafuso","chapa","kit","material","fita","fechadura","trilho","selante","espelho"]
-PALAVRAS_EMAIL = ["email","e-mail","emails","mensagem","caixa","gmail","não lido","nao lido","responde","responder","responda"]
-PALAVRAS_AGENDA = ["agenda","reunião","reuniao","compromisso","evento","calendário","calendario","hoje","amanhã","amanha","agendar","marcar","horário"]
-PALAVRAS_TAREFA = ["tarefa","lembrar","lembrete","cobrar","pendente","prazo"]
+PALAVRAS_MAO  = ["serralheiro","ajudante","instalador","cortador","montador","mao de obra","mão de obra","fabricação","fabricacao","instalação","instalacao","fábrica","fabrica","dias de","dia de"]
+PALAVRAS_IMP  = ["imposto","nota fiscal","nf ","inss","iss","icms","simples","tributo","taxa","das"]
+PALAVRAS_MAT  = ["aluminio","alumínio","vidro","acessorio","acessório","ferragem","perfil","borracha","silicone","parafuso","chapa","kit","material","fita","fechadura","trilho","selante","espelho"]
+PALAVRAS_EMAIL= ["email","e-mail","emails","mensagem","caixa","gmail","não lido","nao lido","responde","responder","responda"]
+PALAVRAS_AGENDA=["agenda","reunião","reuniao","compromisso","evento","calendário","calendario","hoje","amanhã","amanha","agendar","marcar","horário"]
+PALAVRAS_TAREFA=["tarefa","lembrar","lembrete","cobrar","pendente","prazo"]
 
 def cat_geral(texto):
     t = texto.lower()
@@ -417,7 +440,7 @@ async def job_cobrar_tarefas(context):
 
 async def job_relatorio_semanal(context):
     """Toda segunda às 8h — resumo de obras"""
-    if datetime.now(TZ).weekday() != 0: return  # só segunda
+    if datetime.now(TZ).weekday() != 0: return
     dados = carregar(OWNER_ID)
     obras = dados.get("obras", {})
     if not obras: return
@@ -434,84 +457,30 @@ async def job_relatorio_semanal(context):
         emoji = "🔴" if pct >= 80 else "🟡" if pct >= 60 else "🟢"
         txt += f"{emoji} *{obra['nome']}*\n   Contrato: {fmt(obra['valor'])} | Gasto: {pct:.0f}% | Margem: {mgm:.1f}%\n\n"
     await context.bot.send_message(chat_id=OWNER_ID, text=txt, parse_mode="Markdown")
-# ─── GLASS CARE — JOB AUTOMÁTICO ─────────────────────────────────────────────
-# Adicionar este código no bot.py do Abigail, junto com os outros jobs
-# Também adicionar no main() junto com os outros job_queue.run_repeating
-
-import requests as http_requests  # adicionar no topo se não existir
-
-# Credenciais Z-API (já deve ter no Railway como variável de ambiente)
-ZAPI_INSTANCE = "3F1C150EF6D64265EAE5B20DE66F3711"
-ZAPI_TOKEN    = "D9A13E7A8251463E924D1F5D"
-ZAPI_CLIENT_TOKEN = "F606b47239c674ca68ca604acb5f98c3eS"
-ZAPI_URL      = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-text"
-MEU_NUMERO    = "5531983039481"
-
-
-def enviar_whatsapp(telefone: str, mensagem: str) -> bool:
-    """Envia mensagem WhatsApp via Z-API"""
-    fone = "55" + telefone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-    try:
-        r = http_requests.post(
-            ZAPI_URL,
-            headers={
-                "Content-Type": "application/json",
-                "client-token": ZAPI_CLIENT_TOKEN
-            },
-            json={"phone": fone, "message": mensagem},
-            timeout=15
-        )
-        data = r.json()
-        if data.get("error"):
-            print(f"Z-API erro: {data['error']}")
-            return False
-        return True
-    except Exception as e:
-        print(f"Erro Z-API: {e}")
-        return False
-
-
-def notificar_samuel(mensagem: str) -> bool:
-    """Notifica Samuel no WhatsApp pessoal"""
-    return enviar_whatsapp(MEU_NUMERO, mensagem)
-
 
 async def job_glass_care(context):
-    """
-    Todo dia às 8h — verifica manutenções Glass Care no Firebase.
-    - 7 dias antes: envia WhatsApp ao cliente
-    - No dia: lembra Samuel no Telegram
-    - Após 30 dias da entrega sem lembrete: envia pesquisa de satisfação
-    """
-    from datetime import date, timedelta
-
+    """Todo dia às 8h10 — verifica manutenções Glass Care no CRM Firebase"""
     hoje_dt = date.today()
-    em_7_dias = hoje_dt + timedelta(days=7)
-    em_7_str  = em_7_dias.isoformat()
+    em_7_str  = (hoje_dt + timedelta(days=7)).isoformat()
     hoje_str  = hoje_dt.isoformat()
-
-    alertas_telegram = []
+    alertas   = []
 
     try:
-        # Busca todas as obras no Firebase
-        obras_ref = db.collection("obras").stream()
+        for doc in db.collection("obras").stream():
+            obra      = doc.to_dict()
+            obra_id   = doc.id
+            nome_obra = obra.get("nome", obra.get("cliente", "Obra sem nome"))
+            cliente   = obra.get("nomeCliente", obra.get("cliente", "cliente"))
+            whatsapp  = obra.get("whatsappCliente", "")
+            entrega   = obra.get("dataEntregaReal", "")
+            pos_obra  = obra.get("posObra", {})
+            manut     = pos_obra.get("manutencaoGC", [])
+            lem30     = pos_obra.get("lembrete30", False)
 
-        for doc in obras_ref:
-            obra = doc.to_dict()
-            obra_id = doc.id
-            nome_obra   = obra.get("nome", obra.get("cliente", "Obra sem nome"))
-            cliente     = obra.get("nomeCliente", obra.get("cliente", "cliente"))
-            whatsapp    = obra.get("whatsappCliente", "")
-            entrega     = obra.get("dataEntregaReal", "")
-            pos_obra    = obra.get("posObra", {})
-            manutencoes = pos_obra.get("manutencaoGC", [])
-            lembrete30  = pos_obra.get("lembrete30", False)
-
-            # ── 1. Lembrete de satisfação 30 dias após entrega ───────────────
-            if entrega and not lembrete30 and whatsapp:
+            # ── Pesquisa satisfação 30 dias ──────────────────────────────
+            if entrega and not lem30 and whatsapp:
                 try:
-                    entrega_dt = date.fromisoformat(entrega)
-                    dias_desde = (hoje_dt - entrega_dt).days
+                    dias_desde = (hoje_dt - date.fromisoformat(entrega)).days
                     if dias_desde == 30:
                         msg = (
                             f"Olá {cliente}! 😊\n\n"
@@ -520,123 +489,246 @@ async def job_glass_care(context):
                             f"✅ Como estão funcionando as esquadrias?\n"
                             f"✅ Ficou satisfeito com o resultado?\n"
                             f"✅ Tem alguma dúvida ou necessidade de ajuste?\n\n"
-                            f"Estamos à disposição para garantir sua satisfação! 🏗️\n\n"
+                            f"Estamos à disposição! 🏗️\n\n"
                             f"*Fermet — 42 anos de excelência em esquadrias metálicas*"
                         )
                         if enviar_whatsapp(whatsapp, msg):
-                            # Marca lembrete como enviado no Firebase
-                            db.collection("obras").document(obra_id).update({
-                                "posObra.lembrete30": True
-                            })
-                            alertas_telegram.append(
-                                f"📞 *Pesquisa 30 dias enviada!*\n"
-                                f"Obra: {nome_obra}\nCliente: {cliente}"
-                            )
+                            db.collection("obras").document(obra_id).update({"posObra.lembrete30": True})
+                            alertas.append(f"📞 *Pesquisa 30 dias enviada!*\nObra: {nome_obra} | Cliente: {cliente}")
                 except Exception as e:
                     print(f"Erro lembrete30 {obra_id}: {e}")
 
-            # ── 2. Manutenções Glass Care próximas ───────────────────────────
-            atualizadas = False
-            for i, m in enumerate(manutencoes):
-                data_m = m.get("data", "")
+            # ── Manutenções próximas ──────────────────────────────────────
+            atualizado = False
+            for i, m in enumerate(manut):
+                data_m    = m.get("data", "")
                 concluida = m.get("concluida", False)
-                wp_enviado = m.get("whatsappEnviado", False)
-
-                if concluida or not data_m:
-                    continue
+                wp_env    = m.get("whatsappEnviado", False)
+                if concluida or not data_m: continue
 
                 try:
-                    data_m_dt = date.fromisoformat(data_m)
+                    data_m_dt  = date.fromisoformat(data_m)
                     data_m_fmt = data_m_dt.strftime("%d/%m/%Y")
+                    dias_falt  = (data_m_dt - hoje_dt).days
                 except:
                     continue
 
-                # 7 dias antes — envia WhatsApp ao cliente
-                if data_m == em_7_str and not wp_enviado and whatsapp:
+                # 7 dias antes — envia WhatsApp + cria evento no Google Calendar
+                if data_m == em_7_str and not wp_env and whatsapp:
                     msg = (
                         f"Olá {cliente}! 👋\n\n"
-                        f"A *Fermet Esquadrias* entrará em contato para agendar "
-                        f"a manutenção preventiva das suas esquadrias e limpeza dos vidros.\n\n"
+                        f"A *Fermet Esquadrias* irá realizar a manutenção preventiva "
+                        f"das suas esquadrias e limpeza dos vidros.\n\n"
                         f"📅 *Data prevista:* {data_m_fmt}\n\n"
-                        f"Por favor, confirme sua disponibilidade respondendo "
+                        f"Confirme sua disponibilidade respondendo "
                         f"*SIM* para confirmar ou *NÃO* para reagendarmos.\n\n"
-                        f"Qualquer dúvida estamos à disposição! 🪟"
+                        f"Qualquer dúvida estamos à disposição! 🪟\n\n"
+                        f"*Fermet — 42 anos de excelência em esquadrias metálicas*"
                     )
                     if enviar_whatsapp(whatsapp, msg):
-                        manutencoes[i]["whatsappEnviado"] = True
-                        manutencoes[i]["dataEnvio"] = hoje_str
-                        atualizadas = True
-                        alertas_telegram.append(
-                            f"🪟 *Glass Care enviado ao cliente!*\n"
-                            f"Obra: {nome_obra}\nCliente: {cliente}\n"
-                            f"Manutenção: {data_m_fmt}\n"
-                            f"Aguardando confirmação."
+                        manut[i]["whatsappEnviado"] = True
+                        manut[i]["dataEnvio"] = hoje_str
+                        atualizado = True
+
+                        # Cria evento no Google Calendar
+                        svc_cal = get_calendar()
+                        link_cal = ""
+                        if svc_cal:
+                            ini_cal = TZ.localize(datetime(data_m_dt.year, data_m_dt.month, data_m_dt.day, 9, 0))
+                            fim_cal = ini_cal + timedelta(hours=2)
+                            link_cal = criar_evento_cal(
+                                svc_cal,
+                                f"🪟 Glass Care — {nome_obra}",
+                                ini_cal.isoformat(),
+                                fim_cal.isoformat(),
+                                f"Manutenção preventiva Glass Care\nCliente: {cliente}\nTel: {whatsapp}"
+                            )
+
+                        alertas.append(
+                            f"🪟 *Glass Care agendado!*\n"
+                            f"Obra: {nome_obra} | {data_m_fmt}\n"
+                            f"Cliente: {cliente}\n"
+                            f"WhatsApp enviado ✅"
+                            + (f"\n📅 Evento criado no Calendar!" if link_cal else "")
                         )
 
-                # No dia da manutenção — lembra Samuel no Telegram
-                elif data_m == hoje_str and not concluida:
-                    alertas_telegram.append(
-                        f"🪟 *HOJE — Manutenção Glass Care!*\n"
-                        f"Obra: {nome_obra}\nCliente: {cliente}\n"
-                        f"📞 {whatsapp or 'sem WhatsApp cadastrado'}\n"
-                        f"Verifique se o técnico foi agendado!"
-                    )
-
-                # 1 dia antes — lembra Samuel
-                elif (date.fromisoformat(data_m) - hoje_dt).days == 1 and not concluida:
-                    alertas_telegram.append(
-                        f"⏰ *AMANHÃ — Manutenção Glass Care!*\n"
-                        f"Obra: {nome_obra}\nCliente: {cliente}\n"
-                        f"Data: {data_m_fmt}\n"
+                # 1 dia antes — lembrete Telegram
+                elif dias_falt == 1 and not concluida:
+                    alertas.append(
+                        f"⏰ *AMANHÃ — Glass Care!*\n"
+                        f"Obra: {nome_obra} | {data_m_fmt}\n"
+                        f"Cliente: {cliente} | 📞 {whatsapp or 'sem WhatsApp'}\n"
                         f"Confirme o técnico!"
                     )
 
-            # Salva atualizações no Firebase
-            if atualizadas:
-                db.collection("obras").document(obra_id).update({
-                    "posObra.manutencaoGC": manutencoes
-                })
+                # No dia — alerta urgente
+                elif dias_falt == 0 and not concluida:
+                    alertas.append(
+                        f"🚨 *HOJE — Glass Care!*\n"
+                        f"Obra: {nome_obra}\n"
+                        f"Cliente: {cliente} | 📞 {whatsapp or 'sem WhatsApp'}\n"
+                        f"O técnico foi agendado?"
+                    )
+
+                # Vencida — alerta vermelho
+                elif dias_falt < 0 and not concluida:
+                    alertas.append(
+                        f"🔴 *VENCIDA há {abs(dias_falt)} dias!*\n"
+                        f"Obra: {nome_obra} | {data_m_fmt}\n"
+                        f"Cliente: {cliente}"
+                    )
+
+            if atualizado:
+                db.collection("obras").document(obra_id).update({"posObra.manutencaoGC": manut})
 
     except Exception as e:
         print(f"Erro job_glass_care: {e}")
-        await context.bot.send_message(
-            chat_id=OWNER_ID,
-            text=f"⚠️ Erro no job Glass Care: {e}",
-            parse_mode="Markdown"
-        )
+        await context.bot.send_message(chat_id=OWNER_ID, text=f"⚠️ Erro Glass Care: {e}", parse_mode="Markdown")
         return
 
-    # Envia todos os alertas no Telegram
-    if alertas_telegram:
-        txt = "🪟 *Glass Care — Relatório Diário*\n\n"
-        txt += "\n\n".join(alertas_telegram)
-        await context.bot.send_message(
-            chat_id=OWNER_ID,
-            text=txt,
-            parse_mode="Markdown"
-        )
+    if alertas:
+        txt = "🪟 *Glass Care — Relatório Diário*\n\n" + "\n\n".join(alertas)
+        await context.bot.send_message(chat_id=OWNER_ID, text=txt, parse_mode="Markdown")
 
+# ─── COMANDO MANUAL /glasscare ────────────────────────────────────────────────
+async def cmd_glasscare(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Roda o Glass Care manualmente agora"""
+    if update.effective_user.id != OWNER_ID: return
+    await update.message.reply_text("🪟 *Verificando Glass Care agora...*", parse_mode="Markdown")
 
-# ─── REGISTRAR O JOB NO main() ────────────────────────────────────────────────
-# Dentro da função main(), junto com os outros job_queue, adicione:
-#
-#   # Glass Care — todo dia às 8h (após o bom dia)
-#   job_queue.run_daily(
-#       job_glass_care,
-#       time=datetime_time(8, 10, tzinfo=TZ),  # 8h10 horário BH
-#       name="glass_care"
-#   )
-#
-# Certifique-se que no topo do arquivo tem:
-#   from datetime import time as datetime_time
-# ─── WHISPER — TRANSCRIÇÃO DE ÁUDIO ──────────────────────────────────────────
+    hoje_dt  = date.today()
+    hoje_str = hoje_dt.isoformat()
+    alertas  = []
+    enviados = 0
+    erros    = 0
+    total_obras = 0
+
+    try:
+        for doc in db.collection("obras").stream():
+            total_obras += 1
+            obra      = doc.to_dict()
+            obra_id   = doc.id
+            nome_obra = obra.get("nome", obra.get("cliente", "Obra sem nome"))
+            cliente   = obra.get("nomeCliente", obra.get("cliente", "cliente"))
+            whatsapp  = obra.get("whatsappCliente", "")
+            entrega   = obra.get("dataEntregaReal", "")
+            pos_obra  = obra.get("posObra", {})
+            manut     = pos_obra.get("manutencaoGC", [])
+            lem30     = pos_obra.get("lembrete30", False)
+
+            # Pesquisa 30 dias
+            if entrega and not lem30 and whatsapp:
+                try:
+                    dias_desde = (hoje_dt - date.fromisoformat(entrega)).days
+                    if dias_desde >= 28:
+                        msg = (
+                            f"Olá {cliente}! 😊\n\n"
+                            f"A *Fermet Esquadrias* passou pelo prazo de 30 dias "
+                            f"desde a entrega da sua obra e gostaríamos de saber:\n\n"
+                            f"✅ Como estão funcionando as esquadrias?\n"
+                            f"✅ Ficou satisfeito com o resultado?\n"
+                            f"✅ Tem alguma dúvida ou necessidade de ajuste?\n\n"
+                            f"Estamos à disposição! 🏗️\n\n"
+                            f"*Fermet — 42 anos de excelência em esquadrias metálicas*"
+                        )
+                        if enviar_whatsapp(whatsapp, msg):
+                            db.collection("obras").document(obra_id).update({"posObra.lembrete30": True})
+                            enviados += 1
+                            alertas.append(f"📞 *Pesquisa satisfação enviada*\nObra: {nome_obra} | {cliente}")
+                        else:
+                            erros += 1
+                except Exception as e:
+                    erros += 1
+                    print(f"Erro lembrete30 {obra_id}: {e}")
+
+            # Manutenções
+            atualizado = False
+            for i, m in enumerate(manut):
+                data_m    = m.get("data", "")
+                concluida = m.get("concluida", False)
+                wp_env    = m.get("whatsappEnviado", False)
+                if concluida or not data_m: continue
+
+                try:
+                    data_m_dt  = date.fromisoformat(data_m)
+                    data_m_fmt = data_m_dt.strftime("%d/%m/%Y")
+                    dias_falt  = (data_m_dt - hoje_dt).days
+                except:
+                    continue
+
+                if dias_falt < 0:
+                    alertas.append(f"🔴 *VENCIDA há {abs(dias_falt)} dias!*\nObra: {nome_obra} | {data_m_fmt}\nCliente: {cliente} | 📞 {whatsapp or 'sem WhatsApp'}")
+                elif dias_falt == 0:
+                    alertas.append(f"🚨 *HOJE — Glass Care!*\nObra: {nome_obra}\nCliente: {cliente} | 📞 {whatsapp or 'sem WhatsApp'}")
+                elif dias_falt == 1:
+                    alertas.append(f"⏰ *AMANHÃ — Glass Care!*\nObra: {nome_obra} | {data_m_fmt}\nCliente: {cliente}\nConfirme o técnico!")
+                elif dias_falt <= 7 and not wp_env and whatsapp:
+                    msg = (
+                        f"Olá {cliente}! 👋\n\n"
+                        f"A *Fermet Esquadrias* irá realizar a manutenção preventiva "
+                        f"das suas esquadrias e limpeza dos vidros.\n\n"
+                        f"📅 *Data prevista:* {data_m_fmt}\n\n"
+                        f"Confirme respondendo *SIM* ou *NÃO* para reagendarmos.\n\n"
+                        f"🪟 *Fermet — 42 anos de excelência em esquadrias metálicas*"
+                    )
+                    if enviar_whatsapp(whatsapp, msg):
+                        manut[i]["whatsappEnviado"] = True
+                        manut[i]["dataEnvio"] = hoje_str
+                        atualizado = True
+                        enviados += 1
+
+                        # Google Calendar
+                        svc_cal = get_calendar()
+                        link_cal = ""
+                        if svc_cal:
+                            ini_cal = TZ.localize(datetime(data_m_dt.year, data_m_dt.month, data_m_dt.day, 9, 0))
+                            fim_cal = ini_cal + timedelta(hours=2)
+                            link_cal = criar_evento_cal(
+                                svc_cal,
+                                f"🪟 Glass Care — {nome_obra}",
+                                ini_cal.isoformat(),
+                                fim_cal.isoformat(),
+                                f"Manutenção preventiva Glass Care\nCliente: {cliente}\nTel: {whatsapp}"
+                            )
+
+                        alertas.append(
+                            f"✅ *WhatsApp enviado!*\n"
+                            f"Obra: {nome_obra} | {data_m_fmt}\n"
+                            f"Cliente: {cliente}"
+                            + (f"\n📅 Evento criado no Calendar!" if link_cal else "")
+                        )
+                    else:
+                        erros += 1
+                        alertas.append(f"❌ *Erro ao enviar WhatsApp*\nObra: {nome_obra} | {cliente}\nNúmero: {whatsapp}")
+                elif 8 <= dias_falt <= 30:
+                    alertas.append(f"📅 *Glass Care em {dias_falt} dias*\nObra: {nome_obra} | {data_m_fmt}\nCliente: {cliente}")
+
+            if atualizado:
+                db.collection("obras").document(obra_id).update({"posObra.manutencaoGC": manut})
+
+        if not alertas:
+            await update.message.reply_text(
+                f"✅ *Glass Care verificado!*\n\n"
+                f"📊 {total_obras} obra(s) analisada(s)\n"
+                f"Nenhuma manutenção próxima ou pendente.\n\n"
+                f"_Próxima verificação automática: amanhã às 8h10_",
+                parse_mode="Markdown"
+            )
+        else:
+            txt = f"🪟 *Glass Care — Relatório Manual*\n"
+            txt += f"📊 {total_obras} obra(s) | ✅ {enviados} enviado(s) | ❌ {erros} erro(s)\n\n"
+            txt += "\n\n".join(alertas)
+            await update.message.reply_text(txt, parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ *Erro:*\n`{str(e)}`", parse_mode="Markdown")
+
+# ─── WHISPER ──────────────────────────────────────────────────────────────────
 async def transcrever_audio(file_path: str) -> str:
     try:
         with open(file_path, "rb") as audio_file:
             transcript = openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="pt"
+                model="whisper-1", file=audio_file, language="pt"
             )
         return transcript.text
     except Exception as e:
@@ -650,6 +742,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("/agenda"), KeyboardButton("/emails")],
         [KeyboardButton("/tarefas"), KeyboardButton("/funcionarios")],
         [KeyboardButton("/relatorio"), KeyboardButton("/apagar_ultimo")],
+        [KeyboardButton("/glasscare")],
     ], resize_keyboard=True)
     await update.message.reply_text(
         "🏗️ *Abigail 2.0* — Assistente Executiva!\n\n"
@@ -658,8 +751,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "📅 *Criar evento:* _Agendar reunião com Pablo sexta 14h_\n"
         "📧 *Ver e-mails:* /emails\n"
         "📧 *Responder:* _Responde Paulo dizendo que confirmo a reunião_\n"
-        "✅ *Tarefas:* /tarefas | _Tarefa: Pablo levantar material até sexta_\n"
-        "👷 *Funcionários:* /funcionarios\n\n"
+        "✅ *Tarefas:* /tarefas\n"
+        "🪟 *Glass Care:* /glasscare\n\n"
         "_Estou aqui pra te ajudar a focar no que importa!_ 💪",
         parse_mode="Markdown", reply_markup=kb
     )
@@ -686,7 +779,7 @@ async def emails_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Gmail não conectado."); return
     emails = buscar_emails(svc, 5)
     if not emails:
-        await update.message.reply_text("📧 Nenhum e-mail não lido! Caixa limpa ✅"); return
+        await update.message.reply_text("📧 Nenhum e-mail não lido! ✅"); return
     txt = "📧 *E-mails não lidos:*\n\n"
     for i, e in enumerate(emails, 1):
         txt += f"*{i}.* {e['assunto'][:50]}\n   _{e['de'][:35]}_\n   {e['preview'][:80]}...\n\n"
@@ -697,10 +790,10 @@ async def tarefas_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     dados = carregar(uid)
     pendentes = [t for t in dados.get("tarefas", []) if not t.get("concluida")]
     if not pendentes:
-        await update.message.reply_text("✅ Nenhuma tarefa pendente! Tudo em dia."); return
+        await update.message.reply_text("✅ Nenhuma tarefa pendente!"); return
     txt = "✅ *Tarefas pendentes:*\n\n"
     for i, t in enumerate(pendentes, 1):
-        resp = f" — *{t['responsavel']}*" if t.get("responsavel") else ""
+        resp  = f" — *{t['responsavel']}*" if t.get("responsavel") else ""
         prazo = f" — até {t['prazo']}" if t.get("prazo") else ""
         txt += f"{i}. {t['descricao']}{resp}{prazo}\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
@@ -733,7 +826,7 @@ async def nova_obra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texto = " ".join(ctx.args) if ctx.args else ""
     partes = re.split(r'\s*[-—–]\s*', texto, 1)
     if len(partes) < 2:
-        await update.message.reply_text("Formato: `/nova_obra Nome — Valor`\nEx: `/nova_obra João Silva — 100000`", parse_mode="Markdown"); return
+        await update.message.reply_text("Formato: `/nova_obra Nome — Valor`", parse_mode="Markdown"); return
     nome, valor = partes[0].strip(), extrair_valor(partes[1])
     if not nome or valor <= 0:
         await update.message.reply_text("Nome ou valor inválido."); return
@@ -765,8 +858,8 @@ async def listar_obras(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ativo = " ← ativa" if oid == dados.get("obra_atual") else ""
         total = sum(l["valor"] for l in obra.get("lancamentos", []))
         lucro = obra["valor"] - total
-        mgm = (lucro / obra["valor"] * 100) if obra["valor"] > 0 else 0
-        txt += f"🏗️ *{obra['nome']}*{ativo}\n   {fmt(obra['valor'])} | Lucro: {fmt(lucro)} ({mgm:.1f}%)\n   `/trocar {obra['nome']}`\n\n"
+        mgm   = (lucro / obra["valor"] * 100) if obra["valor"] > 0 else 0
+        txt  += f"🏗️ *{obra['nome']}*{ativo}\n   {fmt(obra['valor'])} | Lucro: {fmt(lucro)} ({mgm:.1f}%)\n   `/trocar {obra['nome']}`\n\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 async def resumo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -781,14 +874,14 @@ async def resumo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mat,hhf,hhi,imp,out = s("material"),s("hh_fabricacao"),s("hh_instalacao"),s("imposto"),s("outros")
     total = mat+hhf+hhi+imp+out
     lucro = obra["valor"] - total
-    pct = (total/obra["valor"]*100) if obra["valor"] > 0 else 0
-    mgm = (lucro/obra["valor"]*100) if obra["valor"] > 0 else 0
-    bar = "█"*int(pct/10) + "░"*(10-int(pct/10))
-    txt = f"📊 *{obra['nome']}*\n{'─'*28}\n💼 Contrato: *{fmt(obra['valor'])}*\n\n"
-    txt += f"🔩 Materiais:     {fmt(mat)}\n🏭 MO Fabricação: {fmt(hhf)}\n🔧 MO Instalação: {fmt(hhi)}\n🧾 Impostos:      {fmt(imp)}\n"
-    if out > 0: txt += f"📦 Outros:        {fmt(out)}\n"
-    txt += f"{'─'*28}\n💸 Total: *{fmt(total)}* ({pct:.1f}%)\n[{bar}]\n\n"
-    txt += f"{'✅' if lucro>=0 else '🔴'} Lucro: *{fmt(lucro)}* ({mgm:.1f}%)\n\n_Últimos lançamentos:_\n"
+    pct   = (total/obra["valor"]*100) if obra["valor"] > 0 else 0
+    mgm   = (lucro/obra["valor"]*100) if obra["valor"] > 0 else 0
+    bar   = "█"*int(pct/10) + "░"*(10-int(pct/10))
+    txt   = f"📊 *{obra['nome']}*\n{'─'*28}\n💼 Contrato: *{fmt(obra['valor'])}*\n\n"
+    txt  += f"🔩 Materiais:     {fmt(mat)}\n🏭 MO Fabricação: {fmt(hhf)}\n🔧 MO Instalação: {fmt(hhi)}\n🧾 Impostos:      {fmt(imp)}\n"
+    if out > 0: txt += f"📦 Outros: {fmt(out)}\n"
+    txt  += f"{'─'*28}\n💸 Total: *{fmt(total)}* ({pct:.1f}%)\n[{bar}]\n\n"
+    txt  += f"{'✅' if lucro>=0 else '🔴'} Lucro: *{fmt(lucro)}* ({mgm:.1f}%)\n\n_Últimos lançamentos:_\n"
     for l in reversed(lans[-5:]):
         txt += f"• {l['data']} — {l['desc']} — {fmt(l['valor'])}\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
@@ -815,13 +908,17 @@ async def relatorio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     total = sum(l["valor"] for l in lans)
     lucro = obra["valor"] - total
     labels = {"material":"Material","hh_fabricacao":"MO Fabricação","hh_instalacao":"MO Instalação","imposto":"Imposto","outros":"Outros"}
-    linhas = ["Data,Descricao,Fornecedor,Categoria,Valor"] + [f"{l['data']},\"{l['desc']}\",\"{l.get('forn','')}\",{labels.get(l['cat'],l['cat'])},{l['valor']:.2f}" for l in lans]
+    linhas = ["Data,Descricao,Fornecedor,Categoria,Valor"] + \
+             [f"{l['data']},\"{l['desc']}\",\"{l.get('forn','')}\",{labels.get(l['cat'],l['cat'])},{l['valor']:.2f}" for l in lans]
     linhas += ["", f",,Contrato,,{obra['valor']:.2f}", f",,Total,,{total:.2f}", f",,Lucro,,{lucro:.2f}"]
     nome_arq = obra["nome"].replace(" ", "_") + "_custos.csv"
     with open(nome_arq, "w", encoding="utf-8-sig") as f:
         f.write("\n".join(linhas))
-    await update.message.reply_document(document=open(nome_arq,"rb"), filename=nome_arq,
-        caption=f"📊 *{obra['nome']}*\n{fmt(obra['valor'])} | Gasto: {fmt(total)} | Lucro: {fmt(lucro)}", parse_mode="Markdown")
+    await update.message.reply_document(
+        document=open(nome_arq,"rb"), filename=nome_arq,
+        caption=f"📊 *{obra['nome']}*\n{fmt(obra['valor'])} | Gasto: {fmt(total)} | Lucro: {fmt(lucro)}",
+        parse_mode="Markdown"
+    )
 
 async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -829,7 +926,6 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     cat = cat_geral(texto)
 
-    # ── Criar evento na agenda ─────────────────────────────────────────────
     if cat == "criar_evento":
         svc = get_calendar()
         if not svc:
@@ -844,10 +940,9 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"📅 *Evento criado!*\n\n📌 *{titulo}*\n🗓️ {data_fmt} às {hora}\n\n✅ Adicionado ao Google Agenda!",
                 parse_mode="Markdown")
         else:
-            await update.message.reply_text("⚠️ Erro ao criar evento. Tente novamente.")
+            await update.message.reply_text("⚠️ Erro ao criar evento.")
         return
 
-    # ── Responder e-mail ───────────────────────────────────────────────────
     if cat == "responder_email":
         svc = get_gmail()
         if not svc:
@@ -871,7 +966,6 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Erro ao enviar e-mail.")
         return
 
-    # ── Ver e-mails ────────────────────────────────────────────────────────
     if cat == "email":
         svc = get_gmail()
         if not svc:
@@ -883,7 +977,6 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             txt += f"*{i}.* {e['assunto'][:50]}\n   _{e['de'][:35]}_\n   {e['preview'][:80]}\n\n"
         await update.message.reply_text(txt, parse_mode="Markdown"); return
 
-    # ── Ver agenda ─────────────────────────────────────────────────────────
     if cat == "agenda":
         svc = get_calendar()
         if not svc:
@@ -897,22 +990,23 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             txt += f"🕐 *{hora}* — {e.get('summary','')}\n"
         await update.message.reply_text(txt, parse_mode="Markdown"); return
 
-    # ── Tarefa ─────────────────────────────────────────────────────────────
     if cat == "tarefa":
-        desc = texto.replace("tarefa:","").replace("Tarefa:","").strip()
+        desc    = texto.replace("tarefa:","").replace("Tarefa:","").strip()
         prazo_m = re.search(r'até\s+(\S+(?:\s+\S+)?)', texto.lower())
-        resp_m = re.search(r'(?:para|com|cobrar)\s+([A-Z][a-zA-Z]+)', texto)
-        t = {"id": f"t_{int(datetime.now().timestamp())}", "descricao": desc[:100],
-             "responsavel": resp_m.group(1) if resp_m else "",
-             "prazo": prazo_m.group(1) if prazo_m else "",
-             "criada": hoje(), "concluida": False}
+        resp_m  = re.search(r'(?:para|com|cobrar)\s+([A-Z][a-zA-Z]+)', texto)
+        t = {
+            "id": f"t_{int(datetime.now().timestamp())}",
+            "descricao": desc[:100],
+            "responsavel": resp_m.group(1) if resp_m else "",
+            "prazo": prazo_m.group(1) if prazo_m else "",
+            "criada": hoje(), "concluida": False
+        }
         dados.setdefault("tarefas", []).append(t)
         salvar(uid, dados)
         r = f" para *{t['responsavel']}*" if t["responsavel"] else ""
         p = f" até *{t['prazo']}*" if t["prazo"] else ""
         await update.message.reply_text(f"✅ Tarefa criada{r}{p}!\n📌 _{desc[:80]}_", parse_mode="Markdown"); return
 
-    # ── Lançamento de obra ─────────────────────────────────────────────────
     oid = dados.get("obra_atual")
     if not oid or oid not in dados.get("obras", {}):
         await update.message.reply_text("⚠️ Nenhuma obra ativa!\n\n`/nova_obra Nome — 100000`", parse_mode="Markdown"); return
@@ -922,13 +1016,15 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(extra or "⚠️ Não entendi.", parse_mode="Markdown"); return
 
     obra = dados["obras"][oid]
-    obra.setdefault("lancamentos", []).append({"data": hoje(), "desc": desc, "forn": forn or "", "cat": cat_obra, "valor": round(valor, 2)})
+    obra.setdefault("lancamentos", []).append({
+        "data": hoje(), "desc": desc, "forn": forn or "", "cat": cat_obra, "valor": round(valor, 2)
+    })
     salvar(uid, dados)
 
     total = sum(l["valor"] for l in obra["lancamentos"])
     lucro = obra["valor"] - total
-    pct = (total/obra["valor"]*100) if obra["valor"] > 0 else 0
-    mgm = (lucro/obra["valor"]*100) if obra["valor"] > 0 else 0
+    pct   = (total/obra["valor"]*100) if obra["valor"] > 0 else 0
+    mgm   = (lucro/obra["valor"]*100) if obra["valor"] > 0 else 0
     labels = {"material":"🔩 Material","hh_fabricacao":"🏭 MO Fabricação","hh_instalacao":"🔧 MO Instalação","imposto":"🧾 Imposto","outros":"📦 Outros"}
     txt = f"✅ *{labels.get(cat_obra,'📦')}* lançado!{extra}\n\n📌 {desc}\n💰 *{fmt(valor)}*\n\n📊 *{obra['nome']}:*\nTotal: {fmt(total)} ({pct:.1f}%)\n{'✅' if lucro>=0 else '🔴'} Lucro: *{fmt(lucro)}* ({mgm:.1f}%)"
     if pct >= 80:
@@ -938,34 +1034,13 @@ async def receber_mensagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def receber_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎤 Transcrevendo seu áudio...")
     try:
-        voice = update.message.voice or update.message.audio
-        file = await ctx.bot.get_file(voice.file_id)
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            await file.download_to_drive(tmp.name)
-            texto = await transcrever_audio(tmp.name)
-        if not texto:
-            await update.message.reply_text("⚠️ Não consegui entender o áudio. Tente novamente.")
-            return
-        await update.message.reply_text(f"🎤 *Entendi:* _{texto}_", parse_mode="Markdown")
-        update.message.text = texto
-        await receber_mensagem(update, ctx)
-    except Exception as e:
-        print(f"Erro audio handler: {e}")
-        await update.message.reply_text("⚠️ Erro ao processar áudio.")
-
-# ─── HANDLER DE ÁUDIO ────────────────────────────────────────────────────────
-async def receber_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎤 Transcrevendo seu áudio...")
-    try:
         audio = update.message.voice or update.message.audio
-        file = await ctx.bot.get_file(audio.file_id)
+        file  = await ctx.bot.get_file(audio.file_id)
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             await file.download_to_drive(tmp.name)
             with open(tmp.name, "rb") as f:
                 transcript = openai_client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=f,
-                    language="pt"
+                    model="whisper-1", file=f, language="pt"
                 )
         texto = transcript.text
         await update.message.reply_text(f"🎤 _\"{texto}\"_", parse_mode="Markdown")
@@ -977,35 +1052,49 @@ async def receber_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
-    if not TOKEN: print("ERRO: BOT_TOKEN não definido!"); return
+    if not TOKEN:
+        print("ERRO: BOT_TOKEN não definido!"); return
+
     app = Application.builder().token(TOKEN).build()
 
+    # Comandos
     for cmd, handler in [
-        ("start", start), ("nova_obra", nova_obra), ("trocar", trocar_obra),
-        ("obras", listar_obras), ("resumo", resumo), ("relatorio", relatorio),
-        ("apagar_ultimo", apagar_ultimo), ("funcionarios", funcionarios_cmd),
-        ("agenda", agenda_cmd), ("emails", emails_cmd), ("tarefas", tarefas_cmd),
+        ("start",        start),
+        ("nova_obra",    nova_obra),
+        ("trocar",       trocar_obra),
+        ("obras",        listar_obras),
+        ("resumo",       resumo),
+        ("relatorio",    relatorio),
+        ("apagar_ultimo",apagar_ultimo),
+        ("funcionarios", funcionarios_cmd),
+        ("agenda",       agenda_cmd),
+        ("emails",       emails_cmd),
+        ("tarefas",      tarefas_cmd),
+        ("glasscare",    cmd_glasscare),   # ← NOVO
     ]:
         app.add_handler(CommandHandler(cmd, handler))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receber_mensagem))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, receber_audio))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, receber_audio))
 
+    # Jobs agendados
     if OWNER_ID:
         jq = app.job_queue
-        # Bom dia 7h (Brasília = 10h UTC)
-        jq.run_daily(job_bom_dia, time=datetime.strptime("10:00", "%H:%M").replace(tzinfo=pytz.utc).timetz())
-        # Lembrete a cada 15 min
+        # Bom dia 7h BH (10h UTC)
+        jq.run_daily(job_bom_dia,         time=datetime_time(10, 0,  tzinfo=pytz.utc))
+        # Lembrete agenda a cada 15 min
         jq.run_repeating(job_lembrete_agenda, interval=900, first=60)
-        # Resumo de e-mails a cada 3h
-        jq.run_repeating(job_resumo_emails, interval=10800, first=300)
-        # Cobrar tarefas 9h (12h UTC)
-        jq.run_daily(job_cobrar_tarefas, time=datetime.strptime("12:00", "%H:%M").replace(tzinfo=pytz.utc).timetz())
-        # Relatório semanal segunda 8h (11h UTC)
-        jq.run_daily(job_relatorio_semanal, time=datetime.strptime("11:00", "%H:%M").replace(tzinfo=pytz.utc).timetz())
-        print(f"✅ Jobs agendados para OWNER_ID: {OWNER_ID}")
+        # Resumo e-mails a cada 3h
+        jq.run_repeating(job_resumo_emails,   interval=10800, first=300)
+        # Cobrar tarefas 9h BH (12h UTC)
+        jq.run_daily(job_cobrar_tarefas,  time=datetime_time(12, 0,  tzinfo=pytz.utc))
+        # Relatório semanal segunda 8h BH (11h UTC)
+        jq.run_daily(job_relatorio_semanal, time=datetime_time(11, 0, tzinfo=pytz.utc))
+        # Glass Care 8h10 BH (11h10 UTC) ← NOVO
+        jq.run_daily(job_glass_care,      time=datetime_time(11, 10, tzinfo=pytz.utc))
+        print(f"✅ Jobs agendados — OWNER_ID: {OWNER_ID}")
 
-    print("✅ Abigail 2.0 — Assistente Executiva Completa!")
+    print("✅ Abigail 2.0 + Glass Care — Online!")
     app.run_polling()
 
 if __name__ == "__main__":
